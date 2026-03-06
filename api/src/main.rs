@@ -1,7 +1,6 @@
 mod crd;
 mod error;
 mod handlers;
-mod sse;
 
 use axum::routing::{delete, get, post};
 use axum::Router;
@@ -39,14 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/instances/{name}/restart",
             post(handlers::restart_instance),
         )
-        .route(
-            "/instances/{name}/backup",
-            post(handlers::trigger_backup),
-        )
-        .route(
-            "/instances/{name}/backups",
-            get(handlers::list_backups),
-        )
+        .route("/instances/{name}/logs", get(handlers::get_logs))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
         .with_state(state);

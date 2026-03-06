@@ -1,19 +1,16 @@
 use std::env;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::response::sse::Sse;
 use axum::response::{IntoResponse, Json};
-use chrono::Utc;
 use k8s_openapi::api::core::v1::Pod;
-use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams};
+use kube::api::{Api, DeleteParams, ListParams, LogParams, Patch, PatchParams, PostParams};
 use kube::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::crd::{Agent, AgentSpec, AgentState};
 use crate::error::AppError;
-use crate::sse::watch_agent_status;
 
 fn agent_namespace() -> String {
     env::var("AGENT_NAMESPACE").unwrap_or_else(|_| "agents".to_string())
@@ -43,11 +40,8 @@ pub struct InstanceResponse {
     pub state: String,
     pub phase: Option<String>,
     pub pod_ip: Option<String>,
-    pub ssh_port: Option<i32>,
     pub host_node: Option<String>,
     pub restart_count: Option<i32>,
-    pub last_backup: Option<String>,
-    pub message: Option<String>,
 }
 
 impl From<Agent> for InstanceResponse {
@@ -68,24 +62,20 @@ impl From<Agent> for InstanceResponse {
                 .unwrap_or_else(|| "running".to_string()),
             phase: status.phase,
             pod_ip: status.pod_ip,
-            ssh_port: status.ssh_port,
             host_node: status.host_node,
             restart_count: status.restart_count,
-            last_backup: status.last_backup,
-            message: status.message,
         }
     }
 }
 
-/// POST /instances - Create a new agent instance. Returns SSE stream of status updates.
+/// POST /instances — Create a new agent instance (synchronous).
 pub async fn create_instance(
     State(state): State<AppState>,
     Json(req): Json<CreateInstanceRequest>,
-) -> Result<impl IntoResponse, AppError> {
+) -> Result<(StatusCode, Json<InstanceResponse>), AppError> {
     let ns = agent_namespace();
-    let api: Api<Agent> = Api::namespaced(state.client.clone(), &ns);
+    let api: Api<Agent> = Api::namespaced(state.client, &ns);
 
-    // Check if already exists
     if api.get_opt(&req.name).await?.is_some() {
         return Err(AppError::Conflict(format!(
             "instance '{}' already exists",
@@ -105,15 +95,11 @@ pub async fn create_instance(
         },
     );
 
-    api.create(&PostParams::default(), &agent).await?;
-
-    let watch_api: Api<Agent> = Api::namespaced(state.client.clone(), &ns);
-    let stream = watch_agent_status(watch_api, req.name);
-
-    Ok(Sse::new(stream))
+    let created = api.create(&PostParams::default(), &agent).await?;
+    Ok((StatusCode::CREATED, Json(created.into())))
 }
 
-/// GET /instances - List all agent instances.
+/// GET /instances — List all agent instances.
 pub async fn list_instances(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<InstanceResponse>>, AppError> {
@@ -125,7 +111,7 @@ pub async fn list_instances(
     Ok(Json(instances))
 }
 
-/// GET /instances/:name - Get a single agent instance.
+/// GET /instances/:name — Get a single agent instance.
 pub async fn get_instance(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -141,7 +127,7 @@ pub async fn get_instance(
     Ok(Json(agent.into()))
 }
 
-/// POST /instances/:name/start - Set agent state to running.
+/// POST /instances/:name/start — Start a stopped instance.
 pub async fn start_instance(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -149,28 +135,19 @@ pub async fn start_instance(
     let ns = agent_namespace();
     let api: Api<Agent> = Api::namespaced(state.client, &ns);
 
-    // Verify it exists
     api.get_opt(&name)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("instance '{}' not found", name)))?;
 
-    let patch = json!({
-        "spec": {
-            "state": "running"
-        }
-    });
+    let patch = json!({ "spec": { "state": "running" } });
     let agent = api
-        .patch(
-            &name,
-            &PatchParams::apply("nearai-api"),
-            &Patch::Merge(&patch),
-        )
+        .patch(&name, &PatchParams::apply("nearai-api"), &Patch::Merge(&patch))
         .await?;
 
     Ok(Json(agent.into()))
 }
 
-/// POST /instances/:name/stop - Set agent state to stopped.
+/// POST /instances/:name/stop — Stop a running instance.
 pub async fn stop_instance(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -182,49 +159,36 @@ pub async fn stop_instance(
         .await?
         .ok_or_else(|| AppError::NotFound(format!("instance '{}' not found", name)))?;
 
-    let patch = json!({
-        "spec": {
-            "state": "stopped"
-        }
-    });
+    let patch = json!({ "spec": { "state": "stopped" } });
     let agent = api
-        .patch(
-            &name,
-            &PatchParams::apply("nearai-api"),
-            &Patch::Merge(&patch),
-        )
+        .patch(&name, &PatchParams::apply("nearai-api"), &Patch::Merge(&patch))
         .await?;
 
     Ok(Json(agent.into()))
 }
 
-/// POST /instances/:name/restart - Delete the agent's pod so the operator recreates it.
+/// POST /instances/:name/restart — Restart instance (delete pod, operator recreates).
 pub async fn restart_instance(
     State(state): State<AppState>,
     Path(name): Path<String>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<InstanceResponse>, AppError> {
     let ns = agent_namespace();
     let agent_api: Api<Agent> = Api::namespaced(state.client.clone(), &ns);
 
-    agent_api
+    let agent = agent_api
         .get_opt(&name)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("instance '{}' not found", name)))?;
 
-    // Delete the pod associated with this agent. The operator will recreate it.
     let pod_api: Api<Pod> = Api::namespaced(state.client, &ns);
-    match pod_api.delete(&name, &DeleteParams::default()).await {
-        Ok(_) => Ok(Json(json!({
-            "message": format!("Pod for instance '{}' deleted; operator will recreate it", name)
-        }))),
-        Err(kube::Error::Api(err)) if err.code == 404 => Ok(Json(json!({
-            "message": format!("No pod found for instance '{}'; it may already be restarting", name)
-        }))),
-        Err(e) => Err(AppError::KubeError(e)),
-    }
+    let pod_name = format!("agent-{}", name);
+    // Best-effort delete; pod may not exist yet
+    let _ = pod_api.delete(&pod_name, &DeleteParams::default()).await;
+
+    Ok(Json(agent.into()))
 }
 
-/// DELETE /instances/:name - Delete the Agent CRD.
+/// DELETE /instances/:name — Delete an instance and all its resources.
 pub async fn delete_instance(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -241,64 +205,50 @@ pub async fn delete_instance(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// POST /instances/:name/backup - Trigger a backup by annotating the Agent CRD. Returns SSE stream.
-pub async fn trigger_backup(
-    State(state): State<AppState>,
-    Path(name): Path<String>,
-) -> Result<impl IntoResponse, AppError> {
-    let ns = agent_namespace();
-    let api: Api<Agent> = Api::namespaced(state.client.clone(), &ns);
-
-    api.get_opt(&name)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("instance '{}' not found", name)))?;
-
-    let timestamp = Utc::now().to_rfc3339();
-    let patch = json!({
-        "metadata": {
-            "annotations": {
-                "agents.near.ai/backup-requested": timestamp
-            }
-        }
-    });
-    api.patch(
-        &name,
-        &PatchParams::apply("nearai-api"),
-        &Patch::Merge(&patch),
-    )
-    .await?;
-
-    let watch_api: Api<Agent> = Api::namespaced(state.client.clone(), &ns);
-    let stream = watch_agent_status(watch_api, name);
-
-    Ok(Sse::new(stream))
+#[derive(Deserialize)]
+pub struct LogsQuery {
+    /// Number of lines to return from the end of the log (default: 100).
+    pub tail: Option<i64>,
 }
 
-/// GET /instances/:name/backups - Return backup list from Agent status.
-pub async fn list_backups(
+/// GET /instances/:name/logs — Tail logs from the agent's pod.
+pub async fn get_logs(
     State(state): State<AppState>,
     Path(name): Path<String>,
-) -> Result<Json<serde_json::Value>, AppError> {
+    Query(query): Query<LogsQuery>,
+) -> Result<impl IntoResponse, AppError> {
     let ns = agent_namespace();
-    let api: Api<Agent> = Api::namespaced(state.client, &ns);
 
-    let agent = api
+    // Verify instance exists
+    let agent_api: Api<Agent> = Api::namespaced(state.client.clone(), &ns);
+    agent_api
         .get_opt(&name)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("instance '{}' not found", name)))?;
 
-    let last_backup = agent
-        .status
-        .as_ref()
-        .and_then(|s| s.last_backup.clone());
+    let pod_api: Api<Pod> = Api::namespaced(state.client, &ns);
+    let pod_name = format!("agent-{}", name);
 
-    Ok(Json(json!({
-        "name": name,
-        "last_backup": last_backup,
-    })))
+    let tail_lines = query.tail.unwrap_or(100);
+    let log_params = LogParams {
+        tail_lines: Some(tail_lines),
+        ..Default::default()
+    };
+
+    match pod_api.logs(&pod_name, &log_params).await {
+        Ok(logs) => Ok(Json(json!({
+            "name": name,
+            "lines": logs.lines().collect::<Vec<_>>(),
+        }))),
+        Err(kube::Error::Api(err)) if err.code == 404 => Err(AppError::NotFound(format!(
+            "pod for instance '{}' not found (instance may be stopped)",
+            name
+        ))),
+        Err(e) => Err(AppError::KubeError(e)),
+    }
 }
 
-/// GET /health - Health check endpoint.
+/// GET /health — Health check.
 pub async fn health() -> impl IntoResponse {
     Json(json!({ "status": "ok" }))
 }
