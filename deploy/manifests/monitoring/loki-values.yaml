@@ -1,0 +1,109 @@
+# Helm values for Loki + Promtail
+# Install Loki with:
+#   helm install loki grafana/loki-stack \
+#     -n monitoring --create-namespace \
+#     -f loki-values.yaml
+
+# Loki configuration
+loki:
+  enabled: true
+  persistence:
+    enabled: true
+    size: 50Gi
+  config:
+    auth_enabled: false
+    server:
+      http_listen_port: 3100
+    common:
+      path_prefix: /loki
+      storage:
+        filesystem:
+          chunks_directory: /loki/chunks
+          rules_directory: /loki/rules
+      replication_factor: 1
+    schema_config:
+      configs:
+        - from: "2024-01-01"
+          store: tsdb
+          object_store: filesystem
+          schema: v13
+          index:
+            prefix: index_
+            period: 24h
+    limits_config:
+      retention_period: 168h  # 7 days
+      max_query_series: 5000
+      max_query_parallelism: 2
+    compactor:
+      working_directory: /loki/compactor
+      retention_enabled: true
+
+# Promtail configuration
+promtail:
+  enabled: true
+  config:
+    lokiAddress: http://loki:3100/loki/api/v1/push
+    snippets:
+      # Scrape all pod logs
+      scrapeConfigs: |
+        - job_name: kubernetes-pods
+          kubernetes_sd_configs:
+            - role: pod
+          pipeline_stages:
+            - cri: {}
+            - labeldrop:
+                - filename
+          relabel_configs:
+            - source_labels: [__meta_kubernetes_pod_node_name]
+              target_label: __host__
+            - action: labelmap
+              regex: __meta_kubernetes_pod_label_(.+)
+            - source_labels: [__meta_kubernetes_namespace]
+              target_label: namespace
+            - source_labels: [__meta_kubernetes_pod_name]
+              target_label: pod
+            - source_labels: [__meta_kubernetes_pod_container_name]
+              target_label: container
+            # Tag agent pods specifically
+            - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_pod_label_app_kubernetes_io_managed_by]
+              regex: agents;agent-operator
+              target_label: log_type
+              replacement: agent
+
+        - job_name: kubernetes-system
+          kubernetes_sd_configs:
+            - role: pod
+              namespaces:
+                names: ["kube-system"]
+          pipeline_stages:
+            - cri: {}
+          relabel_configs:
+            - source_labels: [__meta_kubernetes_namespace]
+              target_label: namespace
+            - source_labels: [__meta_kubernetes_pod_name]
+              target_label: pod
+            - source_labels: [__meta_kubernetes_pod_container_name]
+              target_label: container
+  # Mount host logs
+  extraVolumes:
+    - name: containers
+      hostPath:
+        path: /var/log/containers
+    - name: pods
+      hostPath:
+        path: /var/log/pods
+  extraVolumeMounts:
+    - name: containers
+      mountPath: /var/log/containers
+      readOnly: true
+    - name: pods
+      mountPath: /var/log/pods
+      readOnly: true
+
+# Grafana datasource (if using separate Grafana from kube-prometheus-stack,
+# add Loki as a datasource automatically)
+grafana:
+  enabled: false  # Using Grafana from kube-prometheus-stack
+  sidecar:
+    datasources:
+      enabled: true

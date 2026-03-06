@@ -1,0 +1,118 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: agents.near.ai
+spec:
+  group: near.ai
+  names:
+    kind: Agent
+    listKind: AgentList
+    plural: agents
+    singular: agent
+    shortNames:
+      - ag
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: Agent represents a sandboxed NEAR AI agent instance.
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required:
+                - image
+              properties:
+                image:
+                  type: string
+                  description: Container image for the agent environment.
+                cpu:
+                  type: string
+                  description: CPU resource request/limit (e.g. "1", "500m").
+                  default: "1"
+                memory:
+                  type: string
+                  description: Memory resource request/limit (e.g. "512Mi", "2Gi").
+                  default: "512Mi"
+                disk:
+                  type: string
+                  description: Persistent disk size (e.g. "10Gi").
+                  default: "10Gi"
+                state:
+                  type: string
+                  description: Desired state of the agent.
+                  enum:
+                    - Running
+                    - Stopped
+                    - Suspended
+                  default: Running
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  description: Current phase of the agent lifecycle.
+                  enum:
+                    - Pending
+                    - Creating
+                    - Running
+                    - Stopping
+                    - Stopped
+                    - Suspended
+                    - Failed
+                    - Unknown
+                hostNode:
+                  type: string
+                  description: Name of the Kubernetes node running this agent.
+                podIP:
+                  type: string
+                  description: Cluster-internal IP of the agent pod.
+                sshPort:
+                  type: integer
+                  description: Allocated SSH port for external access via sshpiper.
+                restartCount:
+                  type: integer
+                  description: Number of times the agent pod has been restarted.
+                  default: 0
+                lastBackup:
+                  type: string
+                  format: date-time
+                  description: Timestamp of the last successful volume backup.
+                message:
+                  type: string
+                  description: Human-readable message about the current status.
+      additionalPrinterColumns:
+        - name: State
+          type: string
+          jsonPath: .spec.state
+          description: Desired state
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+          description: Current phase
+        - name: Node
+          type: string
+          jsonPath: .status.hostNode
+          priority: 1
+        - name: IP
+          type: string
+          jsonPath: .status.podIP
+          priority: 1
+        - name: SSH
+          type: integer
+          jsonPath: .status.sshPort
+          priority: 1
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      subresources:
+        status: {}

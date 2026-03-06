@@ -1,0 +1,141 @@
+---
+# ServiceAccount for the API server
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agent-api
+  namespace: agents
+  labels:
+    app.kubernetes.io/name: agent-api
+    app.kubernetes.io/part-of: nearai-agents
+
+---
+# ClusterRole granting permissions to manage Agent CRDs and related resources
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agent-api
+  labels:
+    app.kubernetes.io/name: agent-api
+    app.kubernetes.io/part-of: nearai-agents
+rules:
+  # Agent custom resources
+  - apiGroups: ["agents.near.ai"]
+    resources: ["agents", "agents/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Pods managed by agent operator
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "pods/exec"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # PVCs for agent persistent storage
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Services for agent networking
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # ConfigMaps and Secrets
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Events for status reporting
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  # Nodes (read-only, for scheduling info)
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+
+---
+# ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agent-api
+  labels:
+    app.kubernetes.io/name: agent-api
+    app.kubernetes.io/part-of: nearai-agents
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: agent-api
+subjects:
+  - kind: ServiceAccount
+    name: agent-api
+    namespace: agents
+
+---
+# Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-api
+  namespace: agents
+  labels:
+    app.kubernetes.io/name: agent-api
+    app.kubernetes.io/part-of: nearai-agents
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agent-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agent-api
+        app.kubernetes.io/part-of: nearai-agents
+    spec:
+      serviceAccountName: agent-api
+      containers:
+        - name: api
+          image: ghcr.io/nearai/agent-api:latest
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: RUST_LOG
+              value: "info"
+            - name: LISTEN_ADDR
+              value: "0.0.0.0:8080"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+---
+# Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-api
+  namespace: agents
+  labels:
+    app.kubernetes.io/name: agent-api
+    app.kubernetes.io/part-of: nearai-agents
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: agent-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP

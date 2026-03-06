@@ -1,0 +1,9 @@
+/target
+*.swp
+*.swo
+.env
+.idea/
+.vscode/
+*.pem
+*.key
+kubeconfig

@@ -1,0 +1,165 @@
+---
+# ServiceAccount for sshpiper
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ssh-proxy
+  namespace: agents
+  labels:
+    app.kubernetes.io/name: ssh-proxy
+    app.kubernetes.io/part-of: nearai-agents
+
+---
+# ClusterRole - read-only access to Agent CRDs for routing table
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ssh-proxy
+  labels:
+    app.kubernetes.io/name: ssh-proxy
+    app.kubernetes.io/part-of: nearai-agents
+rules:
+  - apiGroups: ["agents.near.ai"]
+    resources: ["agents"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch"]
+
+---
+# ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ssh-proxy
+  labels:
+    app.kubernetes.io/name: ssh-proxy
+    app.kubernetes.io/part-of: nearai-agents
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ssh-proxy
+subjects:
+  - kind: ServiceAccount
+    name: ssh-proxy
+    namespace: agents
+
+---
+# ConfigMap describing routing behaviour.
+# sshpiper routes SSH connections based on the username, which maps to
+# an Agent CR name. The operator maintains per-agent Service objects
+# that expose port 22 on the agent pod. sshpiper resolves the target
+# by querying the Agent CR status (podIP / sshPort).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ssh-proxy-config
+  namespace: agents
+  labels:
+    app.kubernetes.io/name: ssh-proxy
+    app.kubernetes.io/part-of: nearai-agents
+data:
+  # sshpiper uses a kubernetes plugin that watches Agent CRs.
+  # The plugin maps the SSH username to the Agent name and routes
+  # to the corresponding pod IP on port 22.
+  sshpiper.yaml: |
+    # sshpiper kubernetes-based routing configuration
+    # The kubernetes plugin reads Agent CRDs to build the routing table.
+    # SSH username -> Agent CR name -> pod IP:22
+    plugin: kubernetes
+    kubernetes:
+      namespace: agents
+      # Label selector to find agent pods
+      labelSelector: "app.kubernetes.io/managed-by=agent-operator"
+      # The SSH username is matched against the agent CR name
+      usernameField: metadata.name
+      # Target is derived from agent status
+      targetHostField: status.podIP
+      targetPort: 22
+
+---
+# Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ssh-proxy
+  namespace: agents
+  labels:
+    app.kubernetes.io/name: ssh-proxy
+    app.kubernetes.io/part-of: nearai-agents
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ssh-proxy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ssh-proxy
+        app.kubernetes.io/part-of: nearai-agents
+    spec:
+      serviceAccountName: ssh-proxy
+      containers:
+        - name: sshpiper
+          image: farmer1992/sshpiperd:latest
+          args:
+            - "/sshpiperd/sshpiperd"
+            - "--log-level=info"
+            - "kubernetes"
+            - "--namespace=agents"
+          ports:
+            - name: ssh
+              containerPort: 2222
+              protocol: TCP
+          volumeMounts:
+            - name: config
+              mountPath: /etc/sshpiper
+              readOnly: true
+            - name: host-keys
+              mountPath: /etc/ssh/host_keys
+          livenessProbe:
+            tcpSocket:
+              port: ssh
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: ssh
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+      volumes:
+        - name: config
+          configMap:
+            name: ssh-proxy-config
+        - name: host-keys
+          emptyDir: {}
+
+---
+# Service (NodePort so external SSH clients can connect)
+apiVersion: v1
+kind: Service
+metadata:
+  name: ssh-proxy
+  namespace: agents
+  labels:
+    app.kubernetes.io/name: ssh-proxy
+    app.kubernetes.io/part-of: nearai-agents
+spec:
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/name: ssh-proxy
+  ports:
+    - name: ssh
+      port: 22
+      targetPort: ssh
+      protocol: TCP

@@ -1,0 +1,15 @@
+# Backup controller configuration
+backup:
+  # Schedule for automated backups (cron format)
+  schedule: "0 */6 * * *"
+  # Recovery Point Objective in hours
+  rpo_hours: 6
+  # Number of backups to retain per agent
+  retention_count: 10
+  # MinIO endpoint
+  s3_endpoint: "http://minio.minio.svc.cluster.local:9000"
+  s3_bucket: "agent-backups"
+  # Encryption
+  encryption: aes-256-gcm
+  # Compression
+  compression: zstd

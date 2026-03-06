@@ -1,0 +1,151 @@
+# Helm values for kube-prometheus-stack
+# Install with:
+#   helm install monitoring prometheus-community/kube-prometheus-stack \
+#     -n monitoring --create-namespace \
+#     -f kube-prometheus-values.yaml
+
+# Grafana
+grafana:
+  enabled: true
+  adminPassword: "changeme"  # Override in production
+  service:
+    type: ClusterIP
+
+# Prometheus
+prometheus:
+  prometheusSpec:
+    retention: 15d
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 50Gi
+    # Scrape agent operator metrics
+    additionalScrapeConfigs:
+      - job_name: "agent-operator"
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: ["agents"]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+            regex: agent-operator
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_container_port_number]
+            regex: "8081"
+            action: keep
+      - job_name: "agent-api"
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: ["agents"]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+            regex: agent-api
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_container_port_number]
+            regex: "8080"
+            action: keep
+
+# Alertmanager
+alertmanager:
+  enabled: true
+  alertmanagerSpec:
+    storage:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 10Gi
+
+# Custom alert rules for NEAR agent platform
+additionalPrometheusRulesMap:
+  nearai-host-alerts:
+    groups:
+      - name: nearai.host
+        rules:
+          - alert: HostCPUHigh
+            expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 85
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "High CPU usage on {{ $labels.instance }}"
+              description: "CPU usage is above 85% for more than 5 minutes (current: {{ $value | printf \"%.1f\" }}%)."
+
+          - alert: HostMemHigh
+            expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100 > 90
+            for: 2m
+            labels:
+              severity: warning
+            annotations:
+              summary: "High memory usage on {{ $labels.instance }}"
+              description: "Memory usage is above 90% (current: {{ $value | printf \"%.1f\" }}%)."
+
+          - alert: HostDiskHigh
+            expr: (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}) * 100 > 85
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "High disk usage on {{ $labels.instance }}"
+              description: "Disk usage on {{ $labels.mountpoint }} is above 85% (current: {{ $value | printf \"%.1f\" }}%)."
+
+          - alert: NodeUnreachable
+            expr: up{job="node-exporter"} == 0
+            for: 30s
+            labels:
+              severity: critical
+            annotations:
+              summary: "Node {{ $labels.instance }} is unreachable"
+              description: "Node exporter on {{ $labels.instance }} has been down for more than 30 seconds."
+
+      - name: nearai.agents
+        rules:
+          - alert: AgentCrashLoop
+            expr: increase(kube_pod_container_status_restarts_total{namespace="agents"}[10m]) > 3
+            for: 1m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Agent pod {{ $labels.pod }} is crash-looping"
+              description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} has restarted {{ $value }} times in the last 10 minutes."
+
+          - alert: AgentOOMKill
+            expr: kube_pod_container_status_last_terminated_reason{namespace="agents", reason="OOMKilled"} == 1
+            for: 0m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Agent pod {{ $labels.pod }} was OOM killed"
+              description: "Container {{ $labels.container }} in pod {{ $labels.pod }} was terminated due to OOM."
+
+          - alert: BackupStale
+            expr: time() - nearai_agent_last_backup_timestamp > 86400
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Backup stale for agent {{ $labels.agent }}"
+              description: "Agent {{ $labels.agent }} has not been backed up for more than 24 hours."
+
+          - alert: AllNodesAtCapacity
+            expr: sum(kube_node_status_allocatable{resource="pods"}) - sum(kube_pod_info) < 5
+            for: 5m
+            labels:
+              severity: critical
+            annotations:
+              summary: "All nodes are near pod capacity"
+              description: "Fewer than 5 pod slots available across the entire cluster."
+
+          - alert: AgentHeartbeatMissing
+            expr: time() - nearai_agent_last_heartbeat_timestamp > 60
+            for: 0m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Heartbeat missing for agent {{ $labels.agent }}"
+              description: "Agent {{ $labels.agent }} has not sent a heartbeat in over 60 seconds."
