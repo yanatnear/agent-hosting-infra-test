@@ -82,26 +82,26 @@ All responses are synchronous JSON. Error format: `{"error": {"code": "...", "me
 
 ```bash
 # Create
-curl -X POST http://<host>:8080/instances \
+curl -X POST http://<host>:30080/instances \
   -H 'Content-Type: application/json' \
   -d '{"name": "my-agent", "image": "ghcr.io/nearai/ironclaw:latest"}'
 
 # List
-curl http://<host>:8080/instances
+curl http://<host>:30080/instances
 
 # Get status
-curl http://<host>:8080/instances/my-agent
+curl http://<host>:30080/instances/my-agent
 
 # Stop / Start / Restart
-curl -X POST http://<host>:8080/instances/my-agent/stop
-curl -X POST http://<host>:8080/instances/my-agent/start
-curl -X POST http://<host>:8080/instances/my-agent/restart
+curl -X POST http://<host>:30080/instances/my-agent/stop
+curl -X POST http://<host>:30080/instances/my-agent/start
+curl -X POST http://<host>:30080/instances/my-agent/restart
 
 # Tail logs
-curl http://<host>:8080/instances/my-agent/logs?tail=50
+curl http://<host>:30080/instances/my-agent/logs?tail=50
 
 # Delete
-curl -X DELETE http://<host>:8080/instances/my-agent
+curl -X DELETE http://<host>:30080/instances/my-agent
 ```
 
 ### SSH Access

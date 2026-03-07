@@ -124,11 +124,18 @@ pub fn build_pod(agent: &Agent) -> Pod {
             }),
             ..Default::default()
         }),
-        volume_mounts: Some(vec![VolumeMount {
-            name: "agent-data".to_string(),
-            mount_path: "/home/agent".to_string(),
-            ..Default::default()
-        }]),
+        volume_mounts: Some(vec![
+            VolumeMount {
+                name: "agent-data".to_string(),
+                mount_path: "/home/agent".to_string(),
+                ..Default::default()
+            },
+            VolumeMount {
+                name: "tmp".to_string(),
+                mount_path: "/tmp".to_string(),
+                ..Default::default()
+            },
+        ]),
         liveness_probe: Some(Probe {
             tcp_socket: Some(TCPSocketAction {
                 port: IntOrString::Int(22),
@@ -166,16 +173,23 @@ pub fn build_pod(agent: &Agent) -> Pod {
             containers: vec![container],
             restart_policy: Some("Always".to_string()),
             termination_grace_period_seconds: Some(30),
-            volumes: Some(vec![Volume {
-                name: "agent-data".to_string(),
-                persistent_volume_claim: Some(
-                    k8s_openapi::api::core::v1::PersistentVolumeClaimVolumeSource {
-                        claim_name: format!("agent-{}-data", name),
-                        read_only: Some(false),
-                    },
-                ),
-                ..Default::default()
-            }]),
+            volumes: Some(vec![
+                Volume {
+                    name: "agent-data".to_string(),
+                    persistent_volume_claim: Some(
+                        k8s_openapi::api::core::v1::PersistentVolumeClaimVolumeSource {
+                            claim_name: format!("agent-{}-data", name),
+                            read_only: Some(false),
+                        },
+                    ),
+                    ..Default::default()
+                },
+                Volume {
+                    name: "tmp".to_string(),
+                    empty_dir: Some(k8s_openapi::api::core::v1::EmptyDirVolumeSource::default()),
+                    ..Default::default()
+                },
+            ]),
             ..Default::default()
         }),
         ..Default::default()

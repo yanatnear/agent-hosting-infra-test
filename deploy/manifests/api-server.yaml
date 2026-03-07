@@ -131,11 +131,12 @@ metadata:
     app.kubernetes.io/name: agent-api
     app.kubernetes.io/part-of: nearai-agents
 spec:
-  type: ClusterIP
+  type: NodePort
   selector:
     app.kubernetes.io/name: agent-api
   ports:
     - name: http
       port: 8080
       targetPort: http
+      nodePort: 30080
       protocol: TCP
