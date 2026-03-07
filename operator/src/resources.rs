@@ -116,6 +116,7 @@ pub fn build_pod(agent: &Agent) -> Pod {
         }),
         security_context: Some(SecurityContext {
             run_as_non_root: Some(true),
+            run_as_user: Some(1000),
             read_only_root_filesystem: Some(true),
             allow_privilege_escalation: Some(false),
             capabilities: Some(k8s_openapi::api::core::v1::Capabilities {
