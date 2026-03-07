@@ -140,6 +140,27 @@ Override per-agent: `{"cpu": "2", "memory": "8Gi", "disk": "20Gi"}`
 - Monitoring dashboards
 - SLA guarantees
 
+## CLI
+
+A command-line client for the API is included in `cli/`.
+
+```bash
+cargo build --release -p agent-cli
+
+# Set the API URL (or pass --api-url each time)
+export AGENT_API_URL=http://136.119.211.246:30080
+
+agent-cli health
+agent-cli create my-agent ghcr.io/nearai/ironclaw:latest --cpu 2 --memory 8Gi
+agent-cli list
+agent-cli get my-agent
+agent-cli logs my-agent --tail 50
+agent-cli stop my-agent
+agent-cli start my-agent
+agent-cli restart my-agent
+agent-cli delete my-agent
+```
+
 ## Development
 
 ```bash
