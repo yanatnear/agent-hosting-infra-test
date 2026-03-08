@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["api", "operator", "cli"]
+members = ["api", "operator", "cli", "tests"]
 
 [workspace.dependencies]
 kube = { version = "0.98", features = ["runtime", "client", "derive"] }
