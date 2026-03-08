@@ -171,8 +171,11 @@ Use the `nearaidev/ironclaw-nearai-worker` image. The entrypoint configures libS
 agent-cli create ironclaw nearaidev/ironclaw-nearai-worker:latest \
   --volume-mount /home/agent \
   --security-profile trusted \
+  --port webhook:8080 --port webui:18789 --port ssh:22 \
   --env NEARAI_API_KEY=<your-key>
 ```
+
+The first `--port` is used for health probes, so put a port that starts quickly (webhook:8080) first. Ports are exposed as NodePorts — use `agent-cli get ironclaw` to see the assigned external ports.
 
 Optional env vars:
 - `SSH_PUBKEY` — public key for SSH access into the agent
