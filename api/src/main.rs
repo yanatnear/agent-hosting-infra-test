@@ -1,14 +1,11 @@
-mod crd;
-mod error;
-mod handlers;
-
 use axum::routing::{delete, get, post};
 use axum::Router;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
-use handlers::AppState;
+use agent_api::handlers;
+use agent_api::handlers::AppState;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
