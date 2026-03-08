@@ -7,3 +7,7 @@
 *.pem
 *.key
 kubeconfig
+tests/.venv/
+tests/__pycache__/
+.claude
+.env.local

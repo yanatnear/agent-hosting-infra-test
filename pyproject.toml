@@ -1,0 +1,19 @@
+[project]
+name = "nearai-infra-tests"
+version = "0.1.0"
+description = "System tests for nearai-infra agent hosting platform"
+requires-python = ">=3.10"
+dependencies = [
+    "pytest>=7.0.0",
+    "pytest-timeout>=2.0.0",
+    "httpx>=0.24.0",
+    "kubernetes>=28.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short --junit-xml=tests/junit.xml"
+timeout = 300

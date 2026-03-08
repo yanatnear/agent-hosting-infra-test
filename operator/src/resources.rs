@@ -230,7 +230,7 @@ pub fn build_network_policy(agent: &Agent) -> NetworkPolicy {
     let mut ssh_proxy_label = BTreeMap::new();
     ssh_proxy_label.insert("app".to_string(), "ssh-proxy".to_string());
 
-    let ingress_rule = NetworkPolicyIngressRule {
+    let ingress_from_infra = NetworkPolicyIngressRule {
         from: Some(vec![
             NetworkPolicyPeer {
                 pod_selector: Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector {
@@ -247,6 +247,18 @@ pub fn build_network_policy(agent: &Agent) -> NetworkPolicy {
                 ..Default::default()
             },
         ]),
+        ..Default::default()
+    };
+
+    // Ingress: allow external traffic (NodePort) on configured ports
+    let ingress_nodeport = NetworkPolicyIngressRule {
+        ports: Some(
+            agent.spec.ports.iter().map(|p| NetworkPolicyPort {
+                port: Some(IntOrString::Int(p.port)),
+                protocol: Some("TCP".to_string()),
+                ..Default::default()
+            }).collect()
+        ),
         ..Default::default()
     };
 
@@ -280,7 +292,7 @@ pub fn build_network_policy(agent: &Agent) -> NetworkPolicy {
                 match_labels: Some(pod_selector_labels),
                 ..Default::default()
             },
-            ingress: Some(vec![ingress_rule]),
+            ingress: Some(vec![ingress_from_infra, ingress_nodeport]),
             egress: Some(vec![egress_rule]),
             policy_types: Some(vec!["Ingress".to_string(), "Egress".to_string()]),
         }),
