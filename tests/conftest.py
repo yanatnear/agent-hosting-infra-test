@@ -44,4 +44,4 @@ def unique_name() -> str:
 
 @pytest.fixture
 def agent_image() -> str:
-    return os.environ.get("TEST_AGENT_IMAGE", "ubuntu:24.04")
+    return os.environ.get("TEST_AGENT_IMAGE", "alpine:latest")
