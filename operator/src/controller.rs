@@ -297,3 +297,387 @@ fn derive_status_from_pod(pod: &Pod) -> AgentStatus {
         ..Default::default()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crd::{AgentSpec, AgentState};
+    use k8s_openapi::api::core::v1::{
+        Container, ContainerState, ContainerStateWaiting, ContainerStatus, Pod, PodSpec,
+        PodStatus, ResourceRequirements,
+    };
+    use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+    use std::collections::BTreeMap;
+
+    // -----------------------------------------------------------------------
+    // Constants
+    // -----------------------------------------------------------------------
+
+    const TEST_IMAGE: &str = "registry.example.com/agent:v1.2.3";
+    const TEST_IMAGE_UPDATED: &str = "registry.example.com/agent:v2.0.0";
+    const TEST_CPU: &str = "2";
+    const TEST_CPU_UPDATED: &str = "4";
+    const TEST_MEMORY: &str = "8Gi";
+    const TEST_MEMORY_UPDATED: &str = "16Gi";
+    const TEST_DISK: &str = "20Gi";
+    const TEST_POD_IP: &str = "10.42.0.15";
+    const TEST_NODE: &str = "worker-01";
+
+    // -----------------------------------------------------------------------
+    // Test helpers
+    // -----------------------------------------------------------------------
+
+    /// Creates a minimal Agent for testing pod_needs_update().
+    fn make_agent(image: &str, cpu: &str, memory: &str) -> Agent {
+        let mut agent = Agent::new(
+            "test",
+            AgentSpec {
+                image: image.to_string(),
+                state: AgentState::Running,
+                cpu: cpu.to_string(),
+                memory: memory.to_string(),
+                disk: TEST_DISK.to_string(),
+                env: vec![],
+            },
+        );
+        agent.metadata.uid = Some("test-uid".to_string());
+        agent.metadata.namespace = Some("agents".to_string());
+        agent
+    }
+
+    /// Creates a Pod with the given container image and resource limits.
+    /// Mimics what Kubernetes returns for a running pod.
+    fn make_pod_with_resources(image: &str, cpu: &str, memory: &str) -> Pod {
+        let mut limits = BTreeMap::new();
+        limits.insert("cpu".to_string(), Quantity(cpu.to_string()));
+        limits.insert("memory".to_string(), Quantity(memory.to_string()));
+
+        Pod {
+            spec: Some(PodSpec {
+                containers: vec![Container {
+                    name: "agent".to_string(),
+                    image: Some(image.to_string()),
+                    resources: Some(ResourceRequirements {
+                        limits: Some(limits),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// Creates a Pod with realistic status fields for testing derive_status_from_pod().
+    fn make_pod_with_status(
+        phase: &str,
+        pod_ip: Option<&str>,
+        node_name: Option<&str>,
+        restart_count: i32,
+    ) -> Pod {
+        Pod {
+            spec: Some(PodSpec {
+                node_name: node_name.map(String::from),
+                containers: vec![Container {
+                    name: "agent".to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            status: Some(PodStatus {
+                phase: Some(phase.to_string()),
+                pod_ip: pod_ip.map(String::from),
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "agent".to_string(),
+                    restart_count,
+                    ready: phase == "Running",
+                    image: TEST_IMAGE.to_string(),
+                    image_id: String::new(),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// Creates a Pod in CrashLoopBackOff state for testing crash detection.
+    fn make_crashloop_pod(restart_count: i32) -> Pod {
+        Pod {
+            spec: Some(PodSpec {
+                node_name: Some(TEST_NODE.to_string()),
+                containers: vec![Container {
+                    name: "agent".to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            status: Some(PodStatus {
+                phase: Some("Running".to_string()),
+                pod_ip: Some(TEST_POD_IP.to_string()),
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "agent".to_string(),
+                    restart_count,
+                    ready: false,
+                    image: TEST_IMAGE.to_string(),
+                    image_id: String::new(),
+                    state: Some(ContainerState {
+                        waiting: Some(ContainerStateWaiting {
+                            reason: Some("CrashLoopBackOff".to_string()),
+                            message: Some("back-off 5m0s restarting".to_string()),
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // pod_needs_update tests
+    // -----------------------------------------------------------------------
+
+    /// **Test Cases #11, #13 — No update needed when spec matches**
+    ///
+    /// WHY THIS MATTERS:
+    /// The controller must not needlessly delete and recreate pods when nothing
+    /// has changed. Unnecessary recreation causes downtime and restarts the
+    /// agent's SSH session.
+    ///
+    /// WHAT THIS TEST DOES:
+    /// 1. Creates a pod and agent with identical image, CPU, and memory
+    /// 2. Calls pod_needs_update()
+    /// 3. Asserts it returns false
+    ///
+    /// IF THIS FAILS:
+    /// Pods will be recreated on every reconciliation loop (every 30s), causing
+    /// constant agent restarts and an unusable system.
+    ///
+    /// WHAT IS BEING TESTED:
+    /// `pod_needs_update()` — private function, tested via inline module.
+    #[test]
+    fn p1_pod_needs_update_returns_false_when_spec_matches() {
+        let agent = make_agent(TEST_IMAGE, TEST_CPU, TEST_MEMORY);
+        let pod = make_pod_with_resources(TEST_IMAGE, TEST_CPU, TEST_MEMORY);
+
+        let needs_update = pod_needs_update(&pod, &agent);
+
+        assert!(
+            !needs_update,
+            "pod_needs_update must return false when image, CPU, and memory all match"
+        );
+    }
+
+    /// **Test Case #11 — Detect image change**
+    ///
+    /// WHY THIS MATTERS:
+    /// When a user updates their agent image (e.g., new version), the controller
+    /// must detect the drift and recreate the pod with the new image.
+    ///
+    /// WHAT THIS TEST DOES:
+    /// 1. Creates a pod with the old image and an agent with the new image
+    /// 2. Calls pod_needs_update()
+    /// 3. Asserts it returns true
+    ///
+    /// IF THIS FAILS:
+    /// Image updates won't take effect until the pod is manually deleted.
+    /// Users will think their deployment is stuck on the old version.
+    ///
+    /// WHAT IS BEING TESTED:
+    /// `pod_needs_update()` image comparison — private function.
+    #[test]
+    fn p1_pod_needs_update_detects_image_change() {
+        let agent = make_agent(TEST_IMAGE_UPDATED, TEST_CPU, TEST_MEMORY);
+        let pod = make_pod_with_resources(TEST_IMAGE, TEST_CPU, TEST_MEMORY);
+
+        let needs_update = pod_needs_update(&pod, &agent);
+
+        assert!(
+            needs_update,
+            "pod_needs_update must return true when image has changed"
+        );
+    }
+
+    /// **Test Case #11 — Detect CPU change**
+    ///
+    /// WHY THIS MATTERS:
+    /// CPU resource changes require pod recreation (Kubernetes does not support
+    /// in-place resource updates for most fields). The controller must detect
+    /// this drift.
+    ///
+    /// WHAT THIS TEST DOES:
+    /// 1. Creates a pod with old CPU and an agent with new CPU
+    /// 2. Calls pod_needs_update()
+    /// 3. Asserts it returns true
+    ///
+    /// IF THIS FAILS:
+    /// CPU changes won't take effect. The pod continues running with the old
+    /// resource allocation, potentially causing OOM or throttling.
+    ///
+    /// WHAT IS BEING TESTED:
+    /// `pod_needs_update()` CPU comparison — private function.
+    #[test]
+    fn p1_pod_needs_update_detects_cpu_change() {
+        let agent = make_agent(TEST_IMAGE, TEST_CPU_UPDATED, TEST_MEMORY);
+        let pod = make_pod_with_resources(TEST_IMAGE, TEST_CPU, TEST_MEMORY);
+
+        let needs_update = pod_needs_update(&pod, &agent);
+
+        assert!(
+            needs_update,
+            "pod_needs_update must return true when CPU has changed"
+        );
+    }
+
+    /// **Test Case #11 — Detect memory change**
+    ///
+    /// WHY THIS MATTERS:
+    /// Memory resource changes require pod recreation. The controller must
+    /// detect this drift to apply the new memory allocation.
+    ///
+    /// WHAT THIS TEST DOES:
+    /// 1. Creates a pod with old memory and an agent with new memory
+    /// 2. Calls pod_needs_update()
+    /// 3. Asserts it returns true
+    ///
+    /// IF THIS FAILS:
+    /// Memory changes won't take effect. The pod runs with old memory limits,
+    /// risking OOMKilled or wasted cluster resources.
+    ///
+    /// WHAT IS BEING TESTED:
+    /// `pod_needs_update()` memory comparison — private function.
+    #[test]
+    fn p1_pod_needs_update_detects_memory_change() {
+        let agent = make_agent(TEST_IMAGE, TEST_CPU, TEST_MEMORY_UPDATED);
+        let pod = make_pod_with_resources(TEST_IMAGE, TEST_CPU, TEST_MEMORY);
+
+        let needs_update = pod_needs_update(&pod, &agent);
+
+        assert!(
+            needs_update,
+            "pod_needs_update must return true when memory has changed"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // derive_status_from_pod tests
+    // -----------------------------------------------------------------------
+
+    /// **Test Cases #12, #13 — Running pod produces correct status**
+    ///
+    /// WHY THIS MATTERS:
+    /// The Agent CRD's status subresource drives the API response and kubectl
+    /// output. If the status mapping is wrong, users see incorrect phase, IP,
+    /// or node information — making debugging impossible.
+    ///
+    /// WHAT THIS TEST DOES:
+    /// 1. Creates a pod with phase="Running", a pod IP, and a node name
+    /// 2. Calls derive_status_from_pod()
+    /// 3. Asserts phase="Running", pod_ip and host_node are populated,
+    ///    restart_count is correct
+    ///
+    /// IF THIS FAILS:
+    /// Running agents will show wrong status in the API. Users cannot determine
+    /// which node their agent is on or what its IP address is.
+    ///
+    /// WHAT IS BEING TESTED:
+    /// `derive_status_from_pod()` — private function.
+    #[test]
+    fn p0_derive_status_running_pod_extracts_all_fields() {
+        let pod = make_pod_with_status("Running", Some(TEST_POD_IP), Some(TEST_NODE), 2);
+
+        let status = derive_status_from_pod(&pod);
+
+        assert_eq!(
+            status.phase.as_deref(),
+            Some("Running"),
+            "Running pod phase must map to 'Running'"
+        );
+        assert_eq!(
+            status.pod_ip.as_deref(),
+            Some(TEST_POD_IP),
+            "must extract pod IP from pod status"
+        );
+        assert_eq!(
+            status.host_node.as_deref(),
+            Some(TEST_NODE),
+            "must extract node name from pod spec"
+        );
+        assert_eq!(
+            status.restart_count,
+            Some(2),
+            "must sum restart counts from container statuses"
+        );
+    }
+
+    /// **Test Case #7 — CrashLoopBackOff detection**
+    ///
+    /// WHY THIS MATTERS:
+    /// When an agent crashes repeatedly, Kubernetes puts it in CrashLoopBackOff.
+    /// The operator must detect this and surface it in the Agent status so users
+    /// can see their agent is broken rather than silently restarting.
+    ///
+    /// WHAT THIS TEST DOES:
+    /// 1. Creates a pod with a container in CrashLoopBackOff waiting state
+    /// 2. Calls derive_status_from_pod()
+    /// 3. Asserts phase="CrashLoopBackOff" and restart_count is populated
+    ///
+    /// IF THIS FAILS:
+    /// Crash-looping agents will incorrectly show as "Running" in the API,
+    /// hiding a critical failure from users.
+    ///
+    /// WHAT IS BEING TESTED:
+    /// `derive_status_from_pod()` CrashLoopBackOff path — private function.
+    #[test]
+    fn p0_derive_status_crashloop_detected_from_waiting_reason() {
+        let pod = make_crashloop_pod(5);
+
+        let status = derive_status_from_pod(&pod);
+
+        assert_eq!(
+            status.phase.as_deref(),
+            Some("CrashLoopBackOff"),
+            "CrashLoopBackOff waiting reason must override the pod phase"
+        );
+        assert_eq!(
+            status.restart_count,
+            Some(5),
+            "restart count must reflect the container's restart count"
+        );
+    }
+
+    /// **Test Case #12 — Succeeded pod maps to Stopped**
+    ///
+    /// WHY THIS MATTERS:
+    /// A pod that exits successfully (phase=Succeeded) should be surfaced as
+    /// "Stopped" in the Agent status, since the agent is no longer running
+    /// but completed normally.
+    ///
+    /// WHAT THIS TEST DOES:
+    /// 1. Creates a pod with phase="Succeeded"
+    /// 2. Calls derive_status_from_pod()
+    /// 3. Asserts phase="Stopped"
+    ///
+    /// IF THIS FAILS:
+    /// Completed agents will show as "Succeeded" instead of "Stopped", creating
+    /// inconsistency between the Agent CRD states and the status display.
+    ///
+    /// WHAT IS BEING TESTED:
+    /// `derive_status_from_pod()` Succeeded→Stopped mapping — private function.
+    #[test]
+    fn p2_derive_status_succeeded_maps_to_stopped() {
+        let pod = make_pod_with_status("Succeeded", None, Some(TEST_NODE), 0);
+
+        let status = derive_status_from_pod(&pod);
+
+        assert_eq!(
+            status.phase.as_deref(),
+            Some("Stopped"),
+            "Succeeded pod phase must map to 'Stopped'"
+        );
+    }
+}
