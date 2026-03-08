@@ -119,7 +119,9 @@ ssh my-agent@<host> -p 30022
 | Disk (PVC) | 10Gi |
 | Storage class | local-path |
 
-Override per-agent: `{"cpu": "2", "memory": "8Gi", "disk": "20Gi"}`
+| Volume mount | /home/agent |
+
+Override per-agent: `{"cpu": "2", "memory": "8Gi", "disk": "20Gi", "volume_mount": "/home/myuser"}`
 
 ## What's Included (MVP)
 
@@ -151,7 +153,7 @@ cargo build --release -p agent-cli
 export AGENT_API_URL=http://136.119.211.246:30080
 
 agent-cli health
-agent-cli create my-agent ghcr.io/nearai/ironclaw:latest --cpu 2 --memory 8Gi
+agent-cli create my-agent ubuntu:24.04 --cpu 2 --memory 8Gi
 agent-cli list
 agent-cli get my-agent
 agent-cli logs my-agent --tail 50
@@ -160,6 +162,24 @@ agent-cli start my-agent
 agent-cli restart my-agent
 agent-cli delete my-agent
 ```
+
+### Deploying Ironclaw
+
+Use the `nearaidev/ironclaw-nearai-worker` image. The entrypoint configures libSQL, SSH, and the gateway automatically. Mount the PVC at `/home/agent` (the image's home directory):
+
+```bash
+agent-cli create ironclaw nearaidev/ironclaw-nearai-worker:latest \
+  --volume-mount /home/agent \
+  --security-profile trusted \
+  --env NEARAI_API_KEY=<your-key>
+```
+
+Optional env vars:
+- `SSH_PUBKEY` — public key for SSH access into the agent
+- `OPENCLAW_GATEWAY_TOKEN` — gateway auth token (default: `changeme`)
+- `NEARAI_API_URL` — NEAR AI API endpoint (default: `https://cloud-api.near.ai/v1`)
+
+The persistent volume at `/home/agent` preserves the database, config, and workspace across restarts.
 
 ## Development
 

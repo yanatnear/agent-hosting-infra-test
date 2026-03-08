@@ -28,6 +28,12 @@ pub struct CreateInstanceRequest {
     pub cpu: Option<String>,
     pub memory: Option<String>,
     pub disk: Option<String>,
+    pub volume_mount: Option<String>,
+    pub security_profile: Option<String>,
+    #[serde(default)]
+    pub env: Vec<crate::crd::EnvVar>,
+    #[serde(default)]
+    pub ports: Vec<crate::crd::PortSpec>,
 }
 
 #[derive(Serialize)]
@@ -42,6 +48,15 @@ pub struct InstanceResponse {
     pub pod_ip: Option<String>,
     pub host_node: Option<String>,
     pub restart_count: Option<i32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub node_ports: Vec<NodePortResponse>,
+}
+
+#[derive(Serialize)]
+pub struct NodePortResponse {
+    pub name: String,
+    pub port: i32,
+    pub node_port: i32,
 }
 
 impl From<Agent> for InstanceResponse {
@@ -64,6 +79,11 @@ impl From<Agent> for InstanceResponse {
             pod_ip: status.pod_ip,
             host_node: status.host_node,
             restart_count: status.restart_count,
+            node_ports: status.node_ports.into_iter().map(|np| NodePortResponse {
+                name: np.name,
+                port: np.port,
+                node_port: np.node_port,
+            }).collect(),
         }
     }
 }
@@ -91,7 +111,17 @@ pub async fn create_instance(
             memory: req.memory.unwrap_or_else(|| "4Gi".to_string()),
             disk: req.disk.unwrap_or_else(|| "10Gi".to_string()),
             state: AgentState::Running,
-            env: Vec::new(),
+            volume_mount: req.volume_mount.unwrap_or_else(|| "/home/agent".to_string()),
+            security_profile: req.security_profile.unwrap_or_else(|| "restricted".to_string()),
+            env: req.env,
+            ports: if req.ports.is_empty() {
+                vec![
+                    crate::crd::PortSpec { name: "ssh".to_string(), port: 22 },
+                    crate::crd::PortSpec { name: "http".to_string(), port: 80 },
+                ]
+            } else {
+                req.ports
+            },
         },
     );
 

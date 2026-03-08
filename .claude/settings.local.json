@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gcloud compute:*)",
+      "Bash(gcloud compute instances describe agent-hosting-test:*)",
+      "Bash(curl:*)",
+      "Bash(cargo build:*)",
+      "Bash(./target/release/agent-cli:*)",
+      "Bash(gcloud compute ssh agent-hosting-test:*)"
+    ]
+  }
+}

@@ -23,15 +23,30 @@ pub struct AgentSpec {
     pub disk: String,
     #[serde(default = "default_state")]
     pub state: AgentState,
+    /// Mount path for the persistent volume.
+    #[serde(default = "default_volume_mount")]
+    pub volume_mount: String,
+    /// Security profile: "restricted" (default) or "trusted".
+    #[serde(default = "default_security_profile")]
+    pub security_profile: String,
     /// Environment variables to set on the agent pod.
     #[serde(default)]
     pub env: Vec<EnvVar>,
+    /// Ports to expose on the agent pod and service.
+    #[serde(default = "default_ports")]
+    pub ports: Vec<PortSpec>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
 pub struct EnvVar {
     pub name: String,
     pub value: String,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
+pub struct PortSpec {
+    pub name: String,
+    pub port: i32,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq)]
@@ -53,6 +68,19 @@ fn default_disk() -> String {
 fn default_state() -> AgentState {
     AgentState::Running
 }
+fn default_volume_mount() -> String {
+    "/home/agent".to_string()
+}
+fn default_security_profile() -> String {
+    "restricted".to_string()
+}
+
+fn default_ports() -> Vec<PortSpec> {
+    vec![
+        PortSpec { name: "ssh".to_string(), port: 22 },
+        PortSpec { name: "http".to_string(), port: 80 },
+    ]
+}
 
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, Default)]
 pub struct AgentStatus {
@@ -70,4 +98,13 @@ pub struct AgentStatus {
     pub last_backup: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub node_ports: Vec<NodePort>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
+pub struct NodePort {
+    pub name: String,
+    pub port: i32,
+    pub node_port: i32,
 }

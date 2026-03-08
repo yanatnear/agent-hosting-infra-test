@@ -24,8 +24,14 @@ pub struct AgentSpec {
     pub memory: String,
     #[serde(default = "default_disk")]
     pub disk: String,
+    #[serde(default = "default_volume_mount")]
+    pub volume_mount: String,
+    #[serde(default = "default_security_profile")]
+    pub security_profile: String,
     #[serde(default)]
     pub env: Vec<EnvVar>,
+    #[serde(default = "default_ports")]
+    pub ports: Vec<PortSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -39,6 +45,12 @@ pub enum AgentState {
 pub struct EnvVar {
     pub name: String,
     pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PortSpec {
+    pub name: String,
+    pub port: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
@@ -57,6 +69,15 @@ pub struct AgentStatus {
     pub last_backup: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub node_ports: Vec<NodePort>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct NodePort {
+    pub name: String,
+    pub port: i32,
+    pub node_port: i32,
 }
 
 fn default_state() -> AgentState {
@@ -73,6 +94,21 @@ fn default_memory() -> String {
 
 fn default_disk() -> String {
     "10Gi".to_string()
+}
+
+fn default_volume_mount() -> String {
+    "/home/agent".to_string()
+}
+
+fn default_security_profile() -> String {
+    "restricted".to_string()
+}
+
+fn default_ports() -> Vec<PortSpec> {
+    vec![
+        PortSpec { name: "ssh".to_string(), port: 22 },
+        PortSpec { name: "http".to_string(), port: 80 },
+    ]
 }
 
 pub fn generate_crd() -> k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition {

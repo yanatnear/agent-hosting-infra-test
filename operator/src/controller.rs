@@ -7,7 +7,7 @@ use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tracing::{info, warn};
 
-use crate::crd::{Agent, AgentState, AgentStatus};
+use crate::crd::{Agent, AgentState, AgentStatus, NodePort};
 use crate::error::{Error, Result};
 use crate::resources;
 
@@ -210,10 +210,12 @@ async fn reconcile_service(client: &Client, ns: &str, agent: &Agent) -> Result<(
 async fn update_status(client: &Client, ns: &str, agent: &Agent) -> Result<()> {
     let agents: Api<Agent> = Api::namespaced(client.clone(), ns);
     let pods: Api<Pod> = Api::namespaced(client.clone(), ns);
+    let services: Api<Service> = Api::namespaced(client.clone(), ns);
     let agent_name = agent.name_any();
     let pod_name = format!("agent-{}", agent_name);
+    let svc_name = format!("agent-{}", agent_name);
 
-    let status = if agent.spec.state == AgentState::Stopped {
+    let mut status = if agent.spec.state == AgentState::Stopped {
         AgentStatus {
             phase: Some("Stopped".to_string()),
             host_node: None,
@@ -230,6 +232,24 @@ async fn update_status(client: &Client, ns: &str, agent: &Agent) -> Result<()> {
             },
         }
     };
+
+    // Read NodePort assignments from the Service
+    if let Ok(Some(svc)) = services.get_opt(&svc_name).await {
+        if let Some(spec) = &svc.spec {
+            if let Some(ports) = &spec.ports {
+                status.node_ports = ports
+                    .iter()
+                    .filter_map(|sp| {
+                        Some(NodePort {
+                            name: sp.name.clone().unwrap_or_default(),
+                            port: sp.port,
+                            node_port: sp.node_port?,
+                        })
+                    })
+                    .collect();
+            }
+        }
+    }
 
     let phase_str = status.phase.clone().unwrap_or_default();
     let patch = serde_json::json!({ "status": status });

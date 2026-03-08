@@ -16,6 +16,40 @@ use kube::{Resource, ResourceExt};
 
 use crate::crd::Agent;
 
+/// Build security context based on the agent's security profile.
+fn build_security_context(profile: &str) -> SecurityContext {
+    match profile {
+        "trusted" => SecurityContext {
+            // Trusted: allow root + privilege escalation for entrypoint scripts
+            // that drop to non-root (e.g. runuser). Use only for known images.
+            capabilities: Some(k8s_openapi::api::core::v1::Capabilities {
+                drop: Some(vec!["ALL".to_string()]),
+                add: Some(vec![
+                    "NET_BIND_SERVICE".to_string(),
+                    "CHOWN".to_string(),
+                    "FOWNER".to_string(),
+                    "SETUID".to_string(),
+                    "SETGID".to_string(),
+                    "DAC_OVERRIDE".to_string(),
+                ]),
+            }),
+            ..Default::default()
+        },
+        _ => SecurityContext {
+            // Restricted (default): non-root, read-only rootfs, no escalation.
+            run_as_non_root: Some(true),
+            run_as_user: Some(1000),
+            read_only_root_filesystem: Some(true),
+            allow_privilege_escalation: Some(false),
+            capabilities: Some(k8s_openapi::api::core::v1::Capabilities {
+                drop: Some(vec!["ALL".to_string()]),
+                add: Some(vec!["NET_BIND_SERVICE".to_string()]),
+            }),
+            ..Default::default()
+        },
+    }
+}
+
 /// Standard labels applied to all resources for a given agent.
 fn agent_labels(name: &str) -> BTreeMap<String, String> {
     let mut labels = BTreeMap::new();
@@ -95,40 +129,24 @@ pub fn build_pod(agent: &Agent) -> Pod {
     let container = Container {
         name: "agent".to_string(),
         image: Some(agent.spec.image.clone()),
-        ports: Some(vec![
-            ContainerPort {
-                container_port: 22,
-                name: Some("ssh".to_string()),
+        ports: Some(
+            agent.spec.ports.iter().map(|p| ContainerPort {
+                container_port: p.port,
+                name: Some(p.name.clone()),
                 protocol: Some("TCP".to_string()),
                 ..Default::default()
-            },
-            ContainerPort {
-                container_port: 80,
-                name: Some("http".to_string()),
-                protocol: Some("TCP".to_string()),
-                ..Default::default()
-            },
-        ]),
+            }).collect()
+        ),
         resources: Some(ResourceRequirements {
             requests: Some(resource_requests),
             limits: Some(resource_limits),
             ..Default::default()
         }),
-        security_context: Some(SecurityContext {
-            run_as_non_root: Some(true),
-            run_as_user: Some(1000),
-            read_only_root_filesystem: Some(true),
-            allow_privilege_escalation: Some(false),
-            capabilities: Some(k8s_openapi::api::core::v1::Capabilities {
-                drop: Some(vec!["ALL".to_string()]),
-                add: Some(vec!["NET_BIND_SERVICE".to_string()]),
-            }),
-            ..Default::default()
-        }),
+        security_context: Some(build_security_context(&agent.spec.security_profile)),
         volume_mounts: Some(vec![
             VolumeMount {
                 name: "agent-data".to_string(),
-                mount_path: "/home/agent".to_string(),
+                mount_path: agent.spec.volume_mount.clone(),
                 ..Default::default()
             },
             VolumeMount {
@@ -137,18 +155,18 @@ pub fn build_pod(agent: &Agent) -> Pod {
                 ..Default::default()
             },
         ]),
-        liveness_probe: Some(Probe {
+        liveness_probe: agent.spec.ports.first().map(|p| Probe {
             tcp_socket: Some(TCPSocketAction {
-                port: IntOrString::Int(22),
+                port: IntOrString::Int(p.port),
                 ..Default::default()
             }),
             period_seconds: Some(10),
             failure_threshold: Some(3),
             ..Default::default()
         }),
-        readiness_probe: Some(Probe {
+        readiness_probe: agent.spec.ports.first().map(|p| Probe {
             tcp_socket: Some(TCPSocketAction {
-                port: IntOrString::Int(22),
+                port: IntOrString::Int(p.port),
                 ..Default::default()
             }),
             period_seconds: Some(5),
@@ -286,24 +304,17 @@ pub fn build_service(agent: &Agent) -> Service {
             ..Default::default()
         },
         spec: Some(ServiceSpec {
-            type_: Some("ClusterIP".to_string()),
+            type_: Some("NodePort".to_string()),
             selector: Some(selector),
-            ports: Some(vec![
-                ServicePort {
-                    name: Some("http".to_string()),
-                    port: 80,
-                    target_port: Some(IntOrString::Int(80)),
+            ports: Some(
+                agent.spec.ports.iter().map(|p| ServicePort {
+                    name: Some(p.name.clone()),
+                    port: p.port,
+                    target_port: Some(IntOrString::Int(p.port)),
                     protocol: Some("TCP".to_string()),
                     ..Default::default()
-                },
-                ServicePort {
-                    name: Some("ssh".to_string()),
-                    port: 22,
-                    target_port: Some(IntOrString::Int(22)),
-                    protocol: Some("TCP".to_string()),
-                    ..Default::default()
-                },
-            ]),
+                }).collect()
+            ),
             ..Default::default()
         }),
         ..Default::default()

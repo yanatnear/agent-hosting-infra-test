@@ -33,6 +33,18 @@ enum Command {
         /// Disk size (e.g. "10Gi", "50Gi")
         #[arg(long)]
         disk: Option<String>,
+        /// Mount path for persistent volume (default: /home/agent)
+        #[arg(long)]
+        volume_mount: Option<String>,
+        /// Security profile: "restricted" (default) or "trusted"
+        #[arg(long, default_value = "restricted")]
+        security_profile: String,
+        /// Ports to expose (NAME:PORT), can be repeated (e.g. --port ssh:22 --port http:8080)
+        #[arg(long = "port", value_name = "NAME:PORT")]
+        ports: Vec<String>,
+        /// Environment variables (KEY=VALUE), can be repeated
+        #[arg(long = "env", value_name = "KEY=VALUE")]
+        envs: Vec<String>,
     },
 
     /// List all agent instances
@@ -88,6 +100,42 @@ struct CreateRequest {
     memory: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     disk: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    volume_mount: Option<String>,
+    security_profile: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    ports: Vec<PortSpec>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    env: Vec<EnvVar>,
+}
+
+#[derive(Serialize)]
+struct EnvVar {
+    name: String,
+    value: String,
+}
+
+#[derive(Serialize)]
+struct PortSpec {
+    name: String,
+    port: i32,
+}
+
+fn parse_env(s: &str) -> Option<EnvVar> {
+    let (name, value) = s.split_once('=')?;
+    Some(EnvVar {
+        name: name.to_string(),
+        value: value.to_string(),
+    })
+}
+
+fn parse_port(s: &str) -> Option<PortSpec> {
+    let (name, port_str) = s.split_once(':')?;
+    let port = port_str.parse().ok()?;
+    Some(PortSpec {
+        name: name.to_string(),
+        port,
+    })
 }
 
 #[derive(Deserialize)]
@@ -102,6 +150,15 @@ struct Instance {
     pod_ip: Option<String>,
     host_node: Option<String>,
     restart_count: Option<i32>,
+    #[serde(default)]
+    node_ports: Vec<NodePortInfo>,
+}
+
+#[derive(Deserialize)]
+struct NodePortInfo {
+    name: String,
+    port: i32,
+    node_port: i32,
 }
 
 #[derive(Deserialize)]
@@ -134,11 +191,17 @@ fn print_instance(inst: &Instance) {
         "Restart Count: {}",
         inst.restart_count.map_or("-".to_string(), |c| c.to_string())
     );
+    if !inst.node_ports.is_empty() {
+        println!("Ports:");
+        for np in &inst.node_ports {
+            println!("  {}:{} → NodePort {}", np.name, np.port, np.node_port);
+        }
+    }
 }
 
 fn print_instance_row(inst: &Instance) {
     println!(
-        "{:<20} {:<30} {:<10} {:<15} {:<6} {:<8} {:<8}",
+        "{:<20} {:<45} {:<10} {:<15} {:<6} {:<8} {:<8}",
         inst.name,
         inst.image,
         inst.state,
@@ -183,13 +246,29 @@ async fn main() {
             cpu,
             memory,
             disk,
+            volume_mount,
+            security_profile,
+            ports,
+            envs,
         } => {
+            let env: Vec<EnvVar> = envs
+                .iter()
+                .filter_map(|s| parse_env(s))
+                .collect();
+            let ports: Vec<PortSpec> = ports
+                .iter()
+                .filter_map(|s| parse_port(s))
+                .collect();
             let req = CreateRequest {
                 name,
                 image,
                 cpu,
                 memory,
                 disk,
+                volume_mount,
+                security_profile,
+                ports,
+                env,
             };
             let resp = client
                 .post(format!("{base}/instances"))
@@ -216,7 +295,7 @@ async fn main() {
                         println!("No instances found.");
                     } else {
                         println!(
-                            "{:<20} {:<30} {:<10} {:<15} {:<6} {:<8} {:<8}",
+                            "{:<20} {:<45} {:<10} {:<15} {:<6} {:<8} {:<8}",
                             "NAME", "IMAGE", "STATE", "PHASE", "CPU", "MEMORY", "DISK"
                         );
                         for inst in &instances {
