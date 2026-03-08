@@ -84,7 +84,7 @@ All responses are synchronous JSON. Error format: `{"error": {"code": "...", "me
 # Create
 curl -X POST http://<host>:30080/instances \
   -H 'Content-Type: application/json' \
-  -d '{"name": "my-agent", "image": "ghcr.io/nearai/ironclaw:latest"}'
+  -d '{"name": "my-agent", "image": "nearaidev/ironclaw-nearai-worker:latest"}'
 
 # List
 curl http://<host>:30080/instances
