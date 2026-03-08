@@ -9,5 +9,6 @@
 kubeconfig
 tests/.venv/
 tests/__pycache__/
+tests/junit.xml
 .claude
 .env.local
