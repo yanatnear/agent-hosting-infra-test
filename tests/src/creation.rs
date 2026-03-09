@@ -227,9 +227,8 @@ async fn test_p0_crash_auto_restarts() {
     let (pods, pod_name) = pod_api(&name).await;
     let _ = exec_in_pod(&pods, &pod_name, vec!["kill", "1"]).await;
 
-    // Wait for it to come back
-    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-    let recovered = wait_for_phase(&client, &name, "Running", TIMEOUT_RUNNING).await;
+    // Wait for restart_count to increase (with proper polling)
+    let recovered = wait_for_restart_count_increase(&client, &name, initial_restarts, TIMEOUT_RUNNING).await;
 
     assert!(
         recovered.restart_count.unwrap_or(0) > initial_restarts,
