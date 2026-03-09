@@ -184,13 +184,64 @@ Optional env vars:
 
 The persistent volume at `/home/agent` preserves the database, config, and workspace across restarts.
 
+## Testing
+
+### Unit Tests
+
+```bash
+cargo test -p agent-api -p agent-operator -p agent-cli
+```
+
+### Integration Tests (Rust)
+
+Requires a running cluster with the API deployed. Set `AGENT_API_URL` and ensure your kubeconfig can reach the cluster (needed for `kubectl exec` in some tests).
+
+```bash
+AGENT_API_URL=http://136.119.211.246:30080 AGENT_NAMESPACE=agents cargo test -p agent-tests
+```
+
+### System Tests (Python)
+
+Requires a running cluster. Install dependencies first:
+
+```bash
+cd tests && pip install -r requirements.txt
+```
+
+Run:
+
+```bash
+AGENT_API_URL=http://136.119.211.246:30080 AGENT_NAMESPACE=agents pytest tests/
+```
+
+Environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AGENT_API_URL` | `http://localhost:30080` (Rust) / required (Python) | API base URL |
+| `AGENT_NAMESPACE` | `agents` | K8s namespace for agent resources |
+| `TEST_AGENT_IMAGE` | `alpine:latest` | Container image for test agents |
+| `TEST_DIND_AGENT_IMAGE` | `nestybox/ubuntu-jammy-systemd-docker:latest` | DinD image for sub-agent tests |
+| `DEPLOY_TIMEOUT_SECONDS` | `120` | Max seconds to wait for agent to reach Running |
+
+### JUnit XML Output
+
+For CI pipelines that consume JUnit XML, install [cargo-nextest](https://nexte.st) and run:
+
+```bash
+make install-tools   # one-time: installs cargo-nextest
+make test-junit      # runs tests, writes test-results/results.xml
+```
+
 ## Development
 
 ```bash
-make build        # Build both crates
-make test         # Run tests
-make fmt          # Format code
-make clippy       # Lint
+make build          # Build all crates
+make test           # Run unit tests
+make test-junit     # Run tests with JUnit XML output (requires cargo-nextest)
+make fmt            # Format code
+make clippy         # Lint
+make install-tools  # Install dev tools (cargo-nextest)
 ```
 
 ```bash
