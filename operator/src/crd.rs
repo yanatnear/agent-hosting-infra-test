@@ -30,6 +30,8 @@ pub struct AgentSpec {
     pub security_profile: String,
     #[serde(default)]
     pub env: Vec<EnvVar>,
+    #[serde(default)]
+    pub enable_docker: bool,
     #[serde(default = "default_ports")]
     pub ports: Vec<PortSpec>,
 }

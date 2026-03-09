@@ -190,7 +190,16 @@ pub fn build_pod(agent: &Agent) -> Pod {
         },
         spec: Some(PodSpec {
             containers: vec![container],
-            runtime_class_name: Some("sysbox".to_string()),
+            runtime_class_name: if agent.spec.enable_docker {
+                Some("sysbox-runc".to_string())
+            } else {
+                None
+            },
+            host_users: if agent.spec.enable_docker {
+                Some(false)
+            } else {
+                None
+            },
             restart_policy: Some("Always".to_string()),
             termination_grace_period_seconds: Some(30),
             volumes: Some(vec![

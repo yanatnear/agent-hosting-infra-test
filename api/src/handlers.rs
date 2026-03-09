@@ -34,6 +34,8 @@ pub struct CreateInstanceRequest {
     pub env: Vec<crate::crd::EnvVar>,
     #[serde(default)]
     pub ports: Vec<crate::crd::PortSpec>,
+    #[serde(default)]
+    pub enable_docker: bool,
 }
 
 #[derive(Serialize)]
@@ -114,6 +116,7 @@ pub async fn create_instance(
             volume_mount: req.volume_mount.unwrap_or_else(|| "/home/agent".to_string()),
             security_profile: req.security_profile.unwrap_or_else(|| "restricted".to_string()),
             env: req.env,
+            enable_docker: req.enable_docker,
             ports: if req.ports.is_empty() {
                 vec![
                     crate::crd::PortSpec { name: "ssh".to_string(), port: 22 },

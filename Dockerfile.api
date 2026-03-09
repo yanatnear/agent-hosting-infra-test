@@ -1,11 +1,11 @@
-FROM rust:1.85-bookworm AS builder
+FROM rust:bookworm AS builder
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY api/ api/
-COPY operator/Cargo.toml operator/Cargo.toml
-RUN mkdir -p operator/src && echo "fn main() {}" > operator/src/main.rs
+COPY operator/ operator/
+COPY cli/ cli/
+COPY tests/ tests/
 RUN cargo build --release -p agent-api
-RUN rm -rf operator/src
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*

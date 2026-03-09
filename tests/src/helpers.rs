@@ -393,3 +393,34 @@ pub async fn wait_for_restart_count_increase(
         tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
+
+/// Creates an agent with Docker enabled using a Docker-in-Docker image.
+pub async fn create_agent_with_docker(client: &Client, name: &str) -> InstanceResponse {
+    let url = format!("{}/instances", api_url());
+    let body = serde_json::json!({
+        "name": name,
+        "image": "docker:dind",  // Use official Docker-in-Docker image
+        "cpu": "500m",  // DinD needs more resources
+        "memory": "512Mi",
+        "disk": "2Gi",
+        "enable_docker": true,
+    });
+
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .expect("POST /instances request failed");
+
+    assert_eq!(
+        resp.status().as_u16(),
+        201,
+        "create_agent_with_docker must return 201 Created for name '{}'",
+        name
+    );
+
+    resp.json::<InstanceResponse>()
+        .await
+        .expect("failed to parse response")
+}

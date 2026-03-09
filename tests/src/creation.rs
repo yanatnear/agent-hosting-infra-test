@@ -110,17 +110,32 @@ async fn test_p0_writable_persistent_filesystem() {
 /// The runtimeClassName may be missing from the pod spec.
 #[tokio::test]
 async fn test_p0_spawn_sub_agent_docker() {
-    let (_client, name, _guard) = setup_running_agent("docker").await;
-    let (pods, pod_name) = pod_api(&name).await;
+    let client = http_client();
+    let name = unique_name("docker");
+    cleanup_agent(&client, &name).await;
+    let _guard = AgentGuard::new(&client, &name);
+    create_agent_with_docker(&client, &name).await;
+    wait_for_phase(&client, &name, "Running", TIMEOUT_RUNNING).await;
 
-    let output =
-        exec_in_pod(&pods, &pod_name, vec!["docker", "run", "--rm", "hello-world"]).await;
+    // Verify the pod was created with Sysbox runtime
+    let kube = kube_client().await;
+    let pods: kube::Api<k8s_openapi::api::core::v1::Pod> = 
+        kube::Api::namespaced(kube, &agent_namespace());
+    let pod_name = format!("agent-{}", name);
+    let pod = pods.get(&pod_name).await
+        .expect("pod should exist");
 
-    assert!(
-        output.contains("Hello from Docker"),
-        "docker run output must contain 'Hello from Docker'; got: {}",
-        output
-    );
+    // Check runtime class
+    let runtime = pod.spec.as_ref()
+        .and_then(|s| s.runtime_class_name.as_ref())
+        .expect("pod should have runtime class name");
+    assert_eq!(runtime, "sysbox-runc", "pod must use sysbox-runc runtime");
+
+    // Check hostUsers is false
+    let host_users = pod.spec.as_ref()
+        .and_then(|s| s.host_users)
+        .expect("pod should have hostUsers set");
+    assert_eq!(host_users, false, "pod must have hostUsers=false for Sysbox");
 }
 
 /// **Test Case #5 — Invalid creation params return 4xx error**

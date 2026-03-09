@@ -33,6 +33,8 @@ pub struct AgentSpec {
     #[serde(default)]
     pub env: Vec<EnvVar>,
     /// Ports to expose on the agent pod and service.
+    #[serde(default)]
+    pub enable_docker: bool,
     #[serde(default = "default_ports")]
     pub ports: Vec<PortSpec>,
 }
