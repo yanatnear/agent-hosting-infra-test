@@ -1,4 +1,4 @@
-.PHONY: build build-api build-operator docker-api docker-operator deploy test fmt clippy
+.PHONY: build build-api build-operator docker-api docker-operator deploy test test-junit fmt clippy install-tools
 
 REGISTRY ?= ghcr.io/nearai
 TAG ?= latest
@@ -29,11 +29,17 @@ deploy:
 test:
 	cargo test --workspace
 
+test-junit:
+	cargo nextest run --workspace --profile ci
+
 fmt:
 	cargo fmt --all
 
 clippy:
 	cargo clippy --workspace -- -D warnings
+
+install-tools:
+	cargo install cargo-nextest
 
 crd-gen:
 	cargo run -p agent-operator -- --crd-gen > deploy/manifests/agent-crd.yaml
