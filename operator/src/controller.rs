@@ -357,7 +357,10 @@ mod tests {
                 cpu: cpu.to_string(),
                 memory: memory.to_string(),
                 disk: TEST_DISK.to_string(),
+                volume_mount: "/home/agent".to_string(),
+                security_profile: "restricted".to_string(),
                 env: vec![],
+                ports: vec![],
             },
         );
         agent.metadata.uid = Some("test-uid".to_string());

@@ -323,7 +323,10 @@ mod tests {
                 cpu: TEST_CPU.to_string(),
                 memory: TEST_MEMORY.to_string(),
                 disk: TEST_DISK.to_string(),
+                volume_mount: "/home/agent".to_string(),
+                security_profile: "restricted".to_string(),
                 env: vec![],
+                ports: vec![],
             },
             status,
         }
@@ -462,7 +465,10 @@ mod tests {
                 cpu: TEST_CPU.to_string(),
                 memory: TEST_MEMORY.to_string(),
                 disk: TEST_DISK.to_string(),
+                volume_mount: "/home/agent".to_string(),
+                security_profile: "restricted".to_string(),
                 env: vec![],
+                ports: vec![],
             },
             status: None,
         };
