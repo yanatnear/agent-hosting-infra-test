@@ -190,6 +190,7 @@ pub fn build_pod(agent: &Agent) -> Pod {
         },
         spec: Some(PodSpec {
             containers: vec![container],
+            runtime_class_name: Some("sysbox".to_string()),
             restart_policy: Some("Always".to_string()),
             termination_grace_period_seconds: Some(30),
             volumes: Some(vec![
@@ -371,7 +372,13 @@ mod tests {
                 cpu: TEST_CPU.to_string(),
                 memory: TEST_MEMORY.to_string(),
                 disk: TEST_DISK.to_string(),
+                volume_mount: "/home/agent".to_string(),
+                security_profile: "restricted".to_string(),
                 env: vec![],
+                ports: vec![
+                    crate::crd::PortSpec { name: "ssh".to_string(), port: 22 },
+                    crate::crd::PortSpec { name: "http".to_string(), port: 80 },
+                ],
             },
         );
         agent.metadata.uid = Some(TEST_UID.to_string());
@@ -921,15 +928,15 @@ mod tests {
 
         // Ingress: allow from ingress-controller and ssh-proxy
         let ingress_rules = spec.ingress.as_ref().expect("must have ingress rules");
-        assert_eq!(ingress_rules.len(), 1, "must have exactly one ingress rule");
+        assert_eq!(ingress_rules.len(), 2, "must have two ingress rules (infra peers + nodeport)");
         let ingress_peers = ingress_rules[0]
             .from
             .as_ref()
-            .expect("ingress rule must have 'from' peers");
+            .expect("first ingress rule must have 'from' peers");
         assert_eq!(
             ingress_peers.len(),
             2,
-            "ingress must allow exactly 2 peer types (ingress-controller, ssh-proxy)"
+            "first ingress rule must allow exactly 2 peer types (ingress-controller, ssh-proxy)"
         );
 
         // Egress: ports 80 and 443 only
@@ -1004,8 +1011,8 @@ mod tests {
         let spec = svc.spec.as_ref().expect("service must have spec");
         assert_eq!(
             spec.type_.as_deref(),
-            Some("ClusterIP"),
-            "service type must be ClusterIP"
+            Some("NodePort"),
+            "service type must be NodePort"
         );
 
         // Selector

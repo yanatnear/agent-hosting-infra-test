@@ -81,34 +81,49 @@ systemctl enable sysbox-fs --now 2>/dev/null || true
 info "Configuring containerd to use sysbox-runc runtime..."
 
 CONTAINERD_DIR="$(dirname "${CONTAINERD_CONFIG}")"
+CONTAINERD_GENERATED="${CONTAINERD_DIR}/config.toml"
 mkdir -p "${CONTAINERD_DIR}"
 
+# The sysbox-runc snippet to append. Works with both containerd v2 and v3
+# plugin paths — we detect the format from the existing config.
+SYSBOX_V3='
+[plugins."io.containerd.cri.v1.runtime".containerd.runtimes.sysbox-runc]
+  runtime_type = "io.containerd.runc.v2"
+
+[plugins."io.containerd.cri.v1.runtime".containerd.runtimes.sysbox-runc.options]
+  BinaryName = "/usr/bin/sysbox-runc"
+'
+
+SYSBOX_V2='
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.sysbox-runc]
+  runtime_type = "io.containerd.runc.v2"
+
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.sysbox-runc.options]
+  BinaryName = "/usr/bin/sysbox-runc"
+'
+
 if [[ ! -f "${CONTAINERD_CONFIG}" ]]; then
-  cat > "${CONTAINERD_CONFIG}" <<'TOML'
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
-  runtime_type = "io.containerd.runc.v2"
-
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.sysbox-runc]
-  runtime_type = "io.containerd.runc.v2"
-
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.sysbox-runc.options]
-  BinaryName = "/usr/bin/sysbox-runc"
-TOML
-  info "Created containerd config template at ${CONTAINERD_CONFIG}"
-else
-  if grep -q "runtimes.sysbox-runc" "${CONTAINERD_CONFIG}"; then
-    info "sysbox-runc runtime already configured in containerd."
+  # No template exists. Copy K3s's generated config as the base, then append.
+  if [[ -f "${CONTAINERD_GENERATED}" ]]; then
+    cp "${CONTAINERD_GENERATED}" "${CONTAINERD_CONFIG}"
+    info "Copied K3s generated config as template base."
   else
-    cat >> "${CONTAINERD_CONFIG}" <<'TOML'
-
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.sysbox-runc]
-  runtime_type = "io.containerd.runc.v2"
-
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.sysbox-runc.options]
-  BinaryName = "/usr/bin/sysbox-runc"
-TOML
-    info "Appended sysbox-runc runtime to existing containerd config."
+    warn "No existing containerd config found. Restart K3s first to generate one."
+    warn "Then re-run this script."
+    exit 1
   fi
+fi
+
+if grep -q "runtimes.sysbox-runc" "${CONTAINERD_CONFIG}"; then
+  info "sysbox-runc runtime already configured in containerd."
+else
+  # Detect config version and append the matching snippet
+  if grep -q "io.containerd.cri.v1" "${CONTAINERD_CONFIG}"; then
+    echo "${SYSBOX_V3}" >> "${CONTAINERD_CONFIG}"
+  else
+    echo "${SYSBOX_V2}" >> "${CONTAINERD_CONFIG}"
+  fi
+  info "Appended sysbox-runc runtime to containerd config template."
 fi
 
 # ---------- restart containerd / K3s ----------

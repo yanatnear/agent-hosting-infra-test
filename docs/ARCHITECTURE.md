@@ -6,7 +6,7 @@ NEAR needs a **multi-tenant agent hosting platform** where many AI agents (IronC
 
 **Key decisions:**
 - **Orchestration:** K3s (lightweight Kubernetes)
-- **Isolation:** Standard containers (runc) for main agents + gVisor (runsc) for sub-agents
+- **Isolation:** Sysbox runtime for all agent pods (enables Docker-in-Docker for sub-agents)
 - **Agent image:** Product-defined (IronClaw, OpenClaw, or other)
 - **Infrastructure:** GCE VMs now, bare metal later
 - **Storage:** Local PVCs (local-path or TopoLVM) for live filesystems, MinIO (S3-compatible) for backups
@@ -43,14 +43,14 @@ NEAR needs a **multi-tenant agent hosting platform** where many AI agents (IronC
   Agent Pod  Agent Pod  Agent Pod
   (PVC)      (PVC)      (PVC)
     |
-  [main container: runc]
-  [sub-agent sidecar(s): gVisor RuntimeClass]
+  [main container: Sysbox runtime]
+  [sub-agents: Docker-in-Docker via Sysbox]
 ```
 
 **How K3s maps to the agent model:**
-- Each **agent** = 1 K8s Pod (main container + optional sub-agent sidecars)
+- Each **agent** = 1 K8s Pod (Sysbox runtime, with Docker available inside for sub-agents)
 - Each **agent's persistent filesystem** = 1 PersistentVolumeClaim (local-path or TopoLVM)
-- Each **sub-agent** = sidecar container in the pod with `runtimeClassName: gvisor`
+- Each **sub-agent** = Docker container spawned inside the agent pod (Docker-in-Docker via Sysbox `runtimeClassName: sysbox`)
 - **Agent-to-agent isolation** = NetworkPolicy (deny all inter-pod traffic) + separate PID/mount/network namespaces (default in K8s)
 - **Scheduling** = K8s scheduler with resource requests/limits (1 vCPU, 4Gi RAM)
 - **Auto-restart** = `restartPolicy: Always` + K8s CrashLoopBackOff detection
@@ -67,7 +67,7 @@ NEAR needs a **multi-tenant agent hosting platform** where many AI agents (IronC
 2. K8s Operator (Rust, using kube-rs) that manages Agent CRD
 3. REST API (Rust/Axum) with SSE streaming, translates to K8s API calls
 4. Agent CRD -> Pod + PVC + NetworkPolicy + Service
-5. gVisor RuntimeClass for sub-agent containers
+5. Sysbox RuntimeClass for agent pods (enables Docker-in-Docker for sub-agents)
 6. Resource limits: 1 vCPU, 4Gi RAM, 10Gi PVC per agent
 
 **Phase 2: Connectivity**
@@ -141,41 +141,47 @@ status:
 **Operator reconciliation (Rust, kube-rs):**
 1. Watch Agent CRD changes
 2. For each Agent, ensure:
-   - Pod exists with correct image, resources, seccomp profile, capability restrictions
+   - Pod exists with correct image, resources, `runtimeClassName: sysbox`, capability restrictions
    - PVC exists (local-path, 10Gi, ReadWriteOnce)
    - NetworkPolicy exists (deny ingress from other agent pods, allow from ingress controller + SSH proxy)
    - Service exists (ClusterIP for internal routing, or NodePort for SSH)
 3. Update Agent status from Pod status
-4. Handle sub-agent requests (agent signals via annotation or sidecar API)
+4. Sub-agents are managed by the agent process itself via Docker-in-Docker (enabled by Sysbox runtime)
 5. Log lifecycle events to PostgreSQL (or K8s Events + external sink)
 
 ### 2. Isolation Model
 
-**Two-tier isolation:**
-- **Main agent containers** run with standard Docker (runc) + hardening
-- **Sub-agent containers** (spawned by agents for untrusted code) run under gVisor (runsc)
+**Sysbox-based isolation:**
+- All agent pods run under the **Sysbox runtime** (`runtimeClassName: sysbox`), which provides enhanced container isolation and enables Docker-in-Docker without privileged mode
+- **Sub-agents** are spawned as Docker containers *inside* the agent pod (DinD), managed by the agent process itself
+- Container hardening (securityContext) is applied on top of Sysbox
 
-**Main agent container (runc + hardening):**
+**Agent pod spec (Sysbox + hardening):**
 ```yaml
-securityContext:
-  runAsNonRoot: true
-  readOnlyRootFilesystem: true
-  allowPrivilegeEscalation: false  # test 9.12
-  capabilities:
-    drop: ["ALL"]                   # test 9.9, 9.11
-    add: ["NET_BIND_SERVICE"]
-  seccompProfile:
-    type: RuntimeDefault            # or custom profile
-resources:
-  requests:
-    cpu: "1"
-    memory: "4Gi"
-    ephemeral-storage: "10Gi"
-  limits:
-    cpu: "1"
-    memory: "4Gi"
-    ephemeral-storage: "10Gi"
+spec:
+  runtimeClassName: sysbox        # Sysbox runtime for DinD support
+  containers:
+    - name: agent
+      securityContext:
+        capabilities:
+          drop: ["ALL"]           # test 9.9, 9.11
+          add: ["NET_BIND_SERVICE"]
+      resources:
+        requests:
+          cpu: "1"
+          memory: "4Gi"
+        limits:
+          cpu: "1"
+          memory: "4Gi"
 ```
+
+**Sub-agent spawning (Docker-in-Docker):**
+```bash
+# Inside the agent container, the agent process can run:
+docker run --rm untrusted-tool:latest <command>
+```
+
+Sysbox intercepts Docker's syscalls and runs the inner container in its own user namespace — no `--privileged` flag needed. The inner container is isolated from the host kernel via Sysbox's syscall interception layer.
 
 **NetworkPolicy (agent-to-agent isolation):**
 ```yaml
@@ -207,28 +213,6 @@ This ensures:
 - Agent A cannot see/reach Agent B (test 9.4, 9.5)
 - Agent cannot access host management services (test 9.10)
 - Only ingress controller and SSH proxy can reach agents
-
-**Sub-agent containers (gVisor):**
-```yaml
-# RuntimeClass (installed once on cluster)
-apiVersion: node.k8s.io/v1
-kind: RuntimeClass
-metadata:
-  name: gvisor
-handler: runsc
----
-# Sub-agent added as sidecar to agent pod
-containers:
-  - name: subagent-001
-    image: untrusted-tool:latest
-    runtimeClassName: gvisor     # gVisor sandbox
-    resources:                   # counted against pod limits
-      requests:
-        cpu: "250m"
-        memory: "512Mi"
-```
-
-Note: K8s 1.29+ supports sidecar containers natively. Sub-agents are added/removed by the operator patching the pod spec (or by using ephemeral containers for short-lived tasks).
 
 ### 3. API Server
 
@@ -404,7 +388,7 @@ User -> GCP LB (HTTPS :443) -> Ingress Controller (Traefik, bundled with K3s)
 
 1. **Heartbeat mechanism** (test 1.11, 8.9): How does IronClaw/OpenClaw signal liveness? HTTP endpoint? K8s liveness probe needs a target.
 2. **Credential storage** (test 1.16): Local filesystem in PVC? K8s Secret mounted as volume? External vault?
-3. **Sub-agent management** (test 1.10, 1.24): How does the main agent request sub-agent creation? API call to operator? Sidecar socket? What info (image, cmd, env)?
+3. **Sub-agent management** (test 1.10, 1.24): Agents spawn sub-agents via Docker-in-Docker (Sysbox). Remaining question: how does the platform track/limit sub-agent resource usage?
 4. **Traffic routing** (test 1.23): Does agent poll for messages, or does gateway push inbound requests?
 5. **In-flight message handling on stop** (test 2.12): Complete current request? Drop? Return error?
 6. **Agent image versioning** (test 11.10): How are images tagged and upgraded? Rolling update or hard restart?
@@ -442,7 +426,7 @@ MVP covers 172/290 tests (59%). P0+P1 covers 212 (73%). Remaining 78 are P2 add-
 | Operator | Rust + kube-rs | Type-safe, performant K8s operator; manages Agent CRD lifecycle |
 | API Server | Rust + Axum | High-performance async HTTP; SSE via K8s watch API |
 | Agent isolation | runc + seccomp + capabilities + NetworkPolicy | Standard container hardening; sufficient for trusted agent images |
-| Sub-agent isolation | gVisor (RuntimeClass) | Kernel-level sandboxing for untrusted sub-agent code |
+| Agent runtime + sub-agent isolation | Sysbox (RuntimeClass) | Enables Docker-in-Docker without privileged mode; agents spawn sub-agents as inner Docker containers |
 | Persistent storage | local-path-provisioner or TopoLVM | Local disk PVCs; same on GCE VMs and bare metal |
 | Backup storage | MinIO (self-hosted) | S3-compatible; presigned URLs; encryption at rest; portable |
 | HTTPS gateway | Traefik (K3s bundled) or Caddy | Wildcard TLS; subdomain routing; WebSocket support |
