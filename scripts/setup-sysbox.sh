@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Install Sysbox on a Linux node and configure containerd to use it.
+# Builds from source to get the latest containerd integration fix.
 # This script must be run as root.
 set -euo pipefail
 
@@ -32,40 +33,60 @@ if command -v sysbox-runc &>/dev/null; then
   info "Sysbox is already installed: ${CURRENT_VERSION}"
   info "Verifying containerd configuration..."
 else
-  # ---------- install sysbox ----------
-  info "Installing Sysbox for ${ARCH}..."
+  # ---------- install sysbox from source ----------
+  info "Building Sysbox from source for ${ARCH}..."
+  info "This provides the latest containerd integration fix (PR #106)"
 
-  # Detect distro for package installation
+  # Install dependencies
   if [[ -f /etc/os-release ]]; then
     . /etc/os-release
     DISTRO="${ID}"
-    VERSION="${VERSION_ID}"
   else
     error "Cannot detect Linux distribution."
   fi
 
   case "${DISTRO}" in
     ubuntu|debian)
-      # Install via .deb package from GitHub releases
-      SYSBOX_VERSION="${SYSBOX_VERSION:-0.6.6}"
-      DEB_FILE="sysbox-ce_${SYSBOX_VERSION}-0.linux_${ARCH}.deb"
-      DOWNLOAD_URL="https://github.com/nestybox/sysbox/releases/download/v${SYSBOX_VERSION}/${DEB_FILE}"
-
-      info "Downloading Sysbox ${SYSBOX_VERSION}..."
-      curl -fsSL "${DOWNLOAD_URL}" -o "/tmp/${DEB_FILE}"
-
-      # Install dependencies
+      info "Installing build dependencies..."
       apt-get update -qq
-      apt-get install -y -qq jq fuse
+      apt-get install -y -qq git make fuse3 rsync
 
-      info "Installing Sysbox package..."
-      dpkg -i "/tmp/${DEB_FILE}" || apt-get install -f -y -qq
-      rm -f "/tmp/${DEB_FILE}"
+      # Install Docker if not present (needed for build)
+      if ! command -v docker &>/dev/null; then
+        info "Installing Docker..."
+        curl -fsSL https://get.docker.com | sh
+      fi
       ;;
     *)
-      error "Unsupported distribution: ${DISTRO}. Install Sysbox manually: https://github.com/nestybox/sysbox"
+      error "Unsupported distribution: ${DISTRO}. Install manually: https://github.com/nestybox/sysbox"
       ;;
   esac
+
+  # Clone and build Sysbox
+  BUILD_DIR="/tmp/sysbox-build"
+  rm -rf "${BUILD_DIR}"
+  
+  info "Cloning Sysbox repository..."
+  git clone --recursive https://github.com/nestybox/sysbox.git "${BUILD_DIR}"
+  cd "${BUILD_DIR}"
+
+  # Update sysbox-runc to latest main (contains containerd fix)
+  info "Updating sysbox-runc to latest main branch..."
+  cd sysbox-runc
+  git pull origin main
+  cd ..
+
+  # Build
+  info "Building Sysbox (this takes ~5 minutes)..."
+  make IMAGE_BASE_DISTRO=ubuntu IMAGE_BASE_RELEASE=jammy sysbox-static
+
+  # Install binaries and systemd services
+  info "Installing Sysbox binaries and services..."
+  make install
+
+  # Cleanup
+  cd /
+  rm -rf "${BUILD_DIR}"
 
   info "Installed sysbox-runc:"
   sysbox-runc --version 2>&1 | head -1 || true
@@ -77,56 +98,69 @@ systemctl enable sysbox --now 2>/dev/null || true
 systemctl enable sysbox-mgr --now 2>/dev/null || true
 systemctl enable sysbox-fs --now 2>/dev/null || true
 
+# Give services a moment to start
+sleep 2
+
+# Verify services are active
+if ! systemctl is-active --quiet sysbox-mgr; then
+  error "sysbox-mgr failed to start. Check: systemctl status sysbox-mgr"
+fi
+if ! systemctl is-active --quiet sysbox-fs; then
+  error "sysbox-fs failed to start. Check: systemctl status sysbox-fs"
+fi
+
+info "Sysbox services are running."
+
 # ---------- configure containerd ----------
 info "Configuring containerd to use sysbox-runc runtime..."
 
 CONTAINERD_DIR="$(dirname "${CONTAINERD_CONFIG}")"
-CONTAINERD_GENERATED="${CONTAINERD_DIR}/config.toml"
 mkdir -p "${CONTAINERD_DIR}"
 
-# The sysbox-runc snippet to append. Works with both containerd v2 and v3
-# plugin paths — we detect the format from the existing config.
-SYSBOX_V3='
-[plugins."io.containerd.cri.v1.runtime".containerd.runtimes.sysbox-runc]
-  runtime_type = "io.containerd.runc.v2"
-
-[plugins."io.containerd.cri.v1.runtime".containerd.runtimes.sysbox-runc.options]
-  BinaryName = "/usr/bin/sysbox-runc"
-'
-
-SYSBOX_V2='
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.sysbox-runc]
-  runtime_type = "io.containerd.runc.v2"
-
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.sysbox-runc.options]
-  BinaryName = "/usr/bin/sysbox-runc"
-'
-
+# K3s uses Go templates - we need to extend the base template
 if [[ ! -f "${CONTAINERD_CONFIG}" ]]; then
-  # No template exists. Copy K3s's generated config as the base, then append.
-  if [[ -f "${CONTAINERD_GENERATED}" ]]; then
-    cp "${CONTAINERD_GENERATED}" "${CONTAINERD_CONFIG}"
-    info "Copied K3s generated config as template base."
-  else
-    warn "No existing containerd config found. Restart K3s first to generate one."
-    warn "Then re-run this script."
-    exit 1
-  fi
-fi
+  info "Creating containerd config template..."
+  cat > "${CONTAINERD_CONFIG}" << 'TMPL'
+{{ template "base" . }}
 
-if grep -q "runtimes.sysbox-runc" "${CONTAINERD_CONFIG}"; then
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.sysbox-runc]
+  runtime_type = "io.containerd.runc.v2"
+  [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.sysbox-runc.options]
+    SystemdCgroup = false
+    BinaryName = "/usr/bin/sysbox-runc"
+TMPL
+  info "Created containerd config template with sysbox-runc runtime."
+elif grep -q "runtimes.sysbox-runc" "${CONTAINERD_CONFIG}"; then
   info "sysbox-runc runtime already configured in containerd."
 else
-  # Detect config version and append the matching snippet
-  if grep -q "io.containerd.cri.v1" "${CONTAINERD_CONFIG}"; then
-    echo "${SYSBOX_V3}" >> "${CONTAINERD_CONFIG}"
-  else
-    echo "${SYSBOX_V2}" >> "${CONTAINERD_CONFIG}"
-  fi
+  # Append sysbox config to existing template
+  cat >> "${CONTAINERD_CONFIG}" << 'TMPL'
+
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.sysbox-runc]
+  runtime_type = "io.containerd.runc.v2"
+  [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.sysbox-runc.options]
+    SystemdCgroup = false
+    BinaryName = "/usr/bin/sysbox-runc"
+TMPL
   info "Appended sysbox-runc runtime to containerd config template."
 fi
 
-# ---------- restart containerd / K3s ----------
+# ---------- create RuntimeClass ----------
+info "Creating Kubernetes RuntimeClass..."
+if kubectl get runtimeclass sysbox-runc &>/dev/null; then
+  info "RuntimeClass 'sysbox-runc' already exists."
+else
+  cat <<YAML | kubectl apply -f -
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: sysbox-runc
+handler: sysbox-runc
+YAML
+  info "Created RuntimeClass 'sysbox-runc'."
+fi
+
+# ---------- restart K3s ----------
 info "Restarting K3s to pick up containerd changes..."
 if systemctl is-active --quiet k3s; then
   systemctl restart k3s
@@ -138,4 +172,20 @@ else
   warn "Neither k3s nor k3s-agent is running. You may need to restart manually."
 fi
 
-info "Sysbox setup complete. The 'sysbox-runc' runtime is available for containerd."
+# Wait for node to be ready
+info "Waiting for node to become Ready..."
+for i in $(seq 1 30); do
+  if kubectl get nodes 2>/dev/null | grep -q " Ready "; then
+    info "Node is Ready."
+    break
+  fi
+  sleep 2
+done
+
+info "============================================"
+info "Sysbox setup complete!"
+info "The 'sysbox-runc' runtime is available."
+info ""
+info "To use it, set runtimeClassName: sysbox-runc"
+info "and hostUsers: false in your pod specs."
+info "============================================"
