@@ -31,8 +31,8 @@ pub fn agent_namespace() -> String {
 // ---------------------------------------------------------------------------
 
 /// Resource specs for test agents — small to conserve cluster capacity.
-pub const TEST_CPU: &str = "500m";
-pub const TEST_MEMORY: &str = "256Mi";
+pub const TEST_CPU: &str = "100m";
+pub const TEST_MEMORY: &str = "128Mi";
 pub const TEST_DISK: &str = "1Gi";
 
 /// Timeout for an agent to reach Running phase from creation.
@@ -350,4 +350,46 @@ pub async fn exec_in_pod(
         .expect("failed to read exec stdout");
 
     String::from_utf8_lossy(&output).to_string()
+}
+
+/// Polls GET /instances/:name until restart_count exceeds min_count or timeout.
+/// Returns the InstanceResponse with the increased restart count on success.
+/// Panics on timeout.
+pub async fn wait_for_restart_count_increase(
+    client: &Client,
+    name: &str,
+    min_count: i32,
+    timeout: Duration,
+) -> InstanceResponse {
+    let url = format!("{}/instances/{}", api_url(), name);
+    let deadline = tokio::time::Instant::now() + timeout;
+
+    loop {
+        if tokio::time::Instant::now() > deadline {
+            panic!(
+                "Timed out waiting for agent '{}' restart_count to exceed {} (waited {:?})",
+                name, min_count, timeout
+            );
+        }
+
+        let resp = client
+            .get(&url)
+            .send()
+            .await
+            .expect("GET /instances/:name request failed");
+
+        if resp.status().is_success() {
+            let instance: InstanceResponse = resp
+                .json()
+                .await
+                .expect("failed to parse instance response");
+
+            let current_count = instance.restart_count.unwrap_or(0);
+            if current_count > min_count {
+                return instance;
+            }
+        }
+
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
 }
