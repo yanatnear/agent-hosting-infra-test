@@ -131,6 +131,7 @@ pub async fn create_agent(client: &Client, name: &str) -> InstanceResponse {
         "cpu": TEST_CPU,
         "memory": TEST_MEMORY,
         "disk": TEST_DISK,
+        "security_profile": "trusted",  // ironclaw needs chown capabilities
     });
 
     let resp = client

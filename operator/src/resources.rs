@@ -272,10 +272,20 @@ pub fn build_network_policy(agent: &Agent) -> NetworkPolicy {
         ..Default::default()
     };
 
-    // Egress: allow all on ports 80 and 443
+    // Egress: allow DNS (53 UDP/TCP) and HTTP/HTTPS (80/443 TCP)
     let egress_rule = NetworkPolicyEgressRule {
         to: None,
         ports: Some(vec![
+            NetworkPolicyPort {
+                port: Some(IntOrString::Int(53)),
+                protocol: Some("UDP".to_string()),
+                ..Default::default()
+            },
+            NetworkPolicyPort {
+                port: Some(IntOrString::Int(53)),
+                protocol: Some("TCP".to_string()),
+                ..Default::default()
+            },
             NetworkPolicyPort {
                 port: Some(IntOrString::Int(80)),
                 protocol: Some("TCP".to_string()),
@@ -948,7 +958,7 @@ mod tests {
             "first ingress rule must allow exactly 2 peer types (ingress-controller, ssh-proxy)"
         );
 
-        // Egress: ports 80 and 443 only
+        // Egress: DNS (53) and HTTP/HTTPS (80/443)
         let egress_rules = spec.egress.as_ref().expect("must have egress rules");
         assert_eq!(egress_rules.len(), 1, "must have exactly one egress rule");
         let egress_ports = egress_rules[0]
@@ -958,12 +968,16 @@ mod tests {
         let egress_port_numbers: Vec<&IntOrString> =
             egress_ports.iter().filter_map(|p| p.port.as_ref()).collect();
         assert!(
+            egress_port_numbers.contains(&&IntOrString::Int(53)),
+            "egress must allow port 53 (DNS)"
+        );
+        assert!(
             egress_port_numbers.contains(&&IntOrString::Int(80)),
-            "egress must allow port 80 (HTTP)"
+            "egress must allow port 80"
         );
         assert!(
             egress_port_numbers.contains(&&IntOrString::Int(443)),
-            "egress must allow port 443 (HTTPS)"
+            "egress must allow port 443"
         );
 
         // Policy types
