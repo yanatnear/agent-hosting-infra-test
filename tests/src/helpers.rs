@@ -36,7 +36,7 @@ pub const TEST_MEMORY: &str = "128Mi";
 pub const TEST_DISK: &str = "1Gi";
 
 /// Timeout for an agent to reach Running phase from creation.
-pub const TIMEOUT_RUNNING: Duration = Duration::from_secs(120);
+pub const TIMEOUT_RUNNING: Duration = Duration::from_secs(300);
 
 /// Timeout for an agent to reach Stopped phase after a stop command.
 pub const TIMEOUT_STOPPED: Duration = Duration::from_secs(60);

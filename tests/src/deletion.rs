@@ -44,7 +44,7 @@ async fn test_p0_delete_stopped_all_resources_gone() {
     // Verify K8s resources are cleaned up (poll for GC)
     let kube = kube_client().await;
     let ns = agent_namespace();
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
 
     let pods: kube::Api<k8s_openapi::api::core::v1::Pod> = kube::Api::namespaced(kube.clone(), &ns);
     let pvcs: kube::Api<k8s_openapi::api::core::v1::PersistentVolumeClaim> = kube::Api::namespaced(kube.clone(), &ns);

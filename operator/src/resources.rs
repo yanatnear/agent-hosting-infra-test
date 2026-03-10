@@ -160,7 +160,7 @@ pub fn build_pod(agent: &Agent) -> Pod {
                 port: IntOrString::Int(p.port),
                 ..Default::default()
             }),
-            initial_delay_seconds: Some(60),
+            initial_delay_seconds: Some(30),
             period_seconds: Some(10),
             failure_threshold: Some(10),
             ..Default::default()
