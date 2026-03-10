@@ -49,7 +49,7 @@ else
     ubuntu|debian)
       info "Installing build dependencies..."
       apt-get update -qq
-      apt-get install -y -qq git make fuse3 rsync
+      apt-get install -y -qq git make fuse3 rsync golang-go
 
       # Install Docker if not present (needed for build)
       if ! command -v docker &>/dev/null; then
