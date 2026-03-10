@@ -38,23 +38,35 @@ async fn test_p0_delete_stopped_all_resources_gone() {
 
     wait_for_deletion(&client, &name, TIMEOUT_DELETED).await;
 
-    // Verify K8s resources are cleaned up
+    // Give GC time to clean up orphaned resources
+    
+
+    // Verify K8s resources are cleaned up (poll for GC)
     let kube = kube_client().await;
     let ns = agent_namespace();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
 
-    let pods: kube::Api<k8s_openapi::api::core::v1::Pod> =
-        kube::Api::namespaced(kube.clone(), &ns);
-    assert!(
-        pods.get_opt(&format!("agent-{}", name)).await.unwrap().is_none(),
-        "pod must be deleted"
-    );
+    let pods: kube::Api<k8s_openapi::api::core::v1::Pod> = kube::Api::namespaced(kube.clone(), &ns);
+    let pvcs: kube::Api<k8s_openapi::api::core::v1::PersistentVolumeClaim> = kube::Api::namespaced(kube.clone(), &ns);
 
-    let pvcs: kube::Api<k8s_openapi::api::core::v1::PersistentVolumeClaim> =
-        kube::Api::namespaced(kube.clone(), &ns);
-    assert!(
-        pvcs.get_opt(&format!("agent-{}-data", name)).await.unwrap().is_none(),
-        "PVC must be deleted"
-    );
+    let mut pod_gone = false;
+    let mut pvc_gone = false;
+
+    while tokio::time::Instant::now() < deadline {
+        if !pod_gone && pods.get_opt(&format!("agent-{}", name)).await.unwrap().is_none() {
+            pod_gone = true;
+        }
+        if !pvc_gone && pvcs.get_opt(&format!("agent-{}-data", name)).await.unwrap().is_none() {
+            pvc_gone = true;
+        }
+        if pod_gone && pvc_gone {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+
+    assert!(pod_gone, "pod must be deleted (waited 30s)");
+    assert!(pvc_gone, "PVC must be deleted (waited 30s)");
 
     let services: kube::Api<k8s_openapi::api::core::v1::Service> =
         kube::Api::namespaced(kube.clone(), &ns);
@@ -101,6 +113,9 @@ async fn test_p0_delete_running_cleans_up() {
     assert_eq!(resp.status().as_u16(), 204, "delete must return 204");
 
     wait_for_deletion(&client, &name, TIMEOUT_DELETED).await;
+
+    // Give GC time to clean up orphaned resources
+    
 }
 
 /// **Test Case #16 — Delete nonexistent agent returns 404**
