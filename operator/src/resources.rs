@@ -389,6 +389,7 @@ mod tests {
         let mut agent = Agent::new(
             name,
             AgentSpec {
+                enable_docker: false,
                 image: TEST_IMAGE.to_string(),
                 state,
                 cpu: TEST_CPU.to_string(),
@@ -737,8 +738,8 @@ mod tests {
         );
         assert_eq!(
             liveness.failure_threshold,
-            Some(3),
-            "liveness probe must tolerate 3 failures before restart"
+            Some(10),
+            "liveness probe must tolerate 10 failures before restart"
         );
 
         // Readiness probe

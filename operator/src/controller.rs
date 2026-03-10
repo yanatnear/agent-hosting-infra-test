@@ -352,6 +352,7 @@ mod tests {
         let mut agent = Agent::new(
             "test",
             AgentSpec {
+                enable_docker: false,
                 image: image.to_string(),
                 state: AgentState::Running,
                 cpu: cpu.to_string(),

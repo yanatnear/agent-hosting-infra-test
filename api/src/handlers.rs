@@ -321,6 +321,7 @@ mod tests {
                 ..Default::default()
             },
             spec: AgentSpec {
+                enable_docker: false,
                 image: TEST_IMAGE.to_string(),
                 state,
                 cpu: TEST_CPU.to_string(),
@@ -463,6 +464,7 @@ mod tests {
                 ..Default::default()
             },
             spec: AgentSpec {
+                enable_docker: false,
                 image: TEST_IMAGE.to_string(),
                 state: AgentState::Running,
                 cpu: TEST_CPU.to_string(),
