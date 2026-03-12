@@ -14,8 +14,4 @@ reqwest = { version = "0.12", features = ["json"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-kube = { version = "0.98", features = ["runtime", "client", "derive", "ws"] }
-k8s-openapi = { version = "0.24", features = ["latest"] }
 uuid = { version = "1", features = ["v4"] }
-futures = "0.3"
-tokio-util = { version = "0.7", features = ["io"] }

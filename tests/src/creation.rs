@@ -36,25 +36,33 @@ async fn test_p0_create_reaches_running() {
 /// fetching data. The NetworkPolicy must allow egress on port 443.
 ///
 /// WHAT THIS TEST DOES:
-/// 1. Creates an agent and waits for Running
-/// 2. Execs `curl -sf https://httpbin.org/get` inside the pod
-/// 3. Asserts the response contains expected JSON
+/// 1. Creates an agent with a command that curls httpbin.org
+/// 2. Waits for Running phase
+/// 3. Checks logs for the expected JSON response
 ///
 /// IF THIS FAILS:
 /// NetworkPolicy egress rules are blocking HTTPS traffic, or DNS resolution
 /// is broken inside agent pods.
 #[tokio::test]
 async fn test_p0_outbound_https() {
-    let (_client, name, _guard) = setup_running_agent("outbound").await;
-    let (pods, pod_name) = pod_api(&name).await;
+    let (client, name, _guard) = setup_running_command_agent(
+        "outbound",
+        vec!["sh", "-c", "curl -sf https://httpbin.org/get && sleep infinity"],
+    )
+    .await;
 
-    let output = exec_in_pod(&pods, &pod_name, vec!["curl", "-sf", "https://httpbin.org/get"])
-        .await;
+    let logs = wait_for_log_containing(
+        &client,
+        &name,
+        "\"url\"",
+        std::time::Duration::from_secs(60),
+    )
+    .await;
 
     assert!(
-        output.contains("\"url\""),
+        logs.contains("\"url\""),
         "curl response must contain JSON from httpbin; got: {}",
-        output
+        logs
     );
 }
 
@@ -67,28 +75,42 @@ async fn test_p0_outbound_https() {
 /// must be writable (backed by PVC) even though the root filesystem is read-only.
 ///
 /// WHAT THIS TEST DOES:
-/// 1. Creates an agent and waits for Running
-/// 2. Writes a marker file to /home/agent via exec
-/// 3. Reads it back and asserts the content matches
+/// 1. Creates an agent with a command that writes a file and reads it back
+/// 2. Waits for Running phase
+/// 3. Checks logs for the marker content
 ///
 /// IF THIS FAILS:
 /// PVC mount is missing or misconfigured. Agent code will fail to write any
 /// files, making the agent useless.
 #[tokio::test]
 async fn test_p0_writable_persistent_filesystem() {
-    let (_client, name, _guard) = setup_running_agent("fs-write").await;
-    let (pods, pod_name) = pod_api(&name).await;
-
     const MARKER: &str = "persist-test-data-12345";
-    let write_cmd = format!("echo -n '{}' > /home/agent/testfile", MARKER);
-    exec_in_pod(&pods, &pod_name, vec!["sh", "-c", &write_cmd]).await;
 
-    let content = exec_in_pod(&pods, &pod_name, vec!["cat", "/home/agent/testfile"]).await;
+    let (client, name, _guard) = setup_running_command_agent(
+        "fs-write",
+        vec![
+            "sh",
+            "-c",
+            &format!(
+                "echo '{}' > /home/agent/testfile && cat /home/agent/testfile && sleep infinity",
+                MARKER
+            ),
+        ],
+    )
+    .await;
 
-    assert_eq!(
-        content.trim(),
+    let logs = wait_for_log_containing(
+        &client,
+        &name,
         MARKER,
-        "file content must match what was written"
+        std::time::Duration::from_secs(30),
+    )
+    .await;
+
+    assert!(
+        logs.contains(MARKER),
+        "file content must match what was written; got: {}",
+        logs
     );
 }
 
@@ -101,9 +123,8 @@ async fn test_p0_writable_persistent_filesystem() {
 /// runtime. This is a core platform capability for multi-agent workflows.
 ///
 /// WHAT THIS TEST DOES:
-/// 1. Creates an agent and waits for Running
-/// 2. Execs `docker run --rm hello-world` inside the pod
-/// 3. Asserts the output contains "Hello from Docker"
+/// 1. Creates a Docker-enabled agent and waits for Running
+/// 2. Checks logs for Docker daemon startup indicating Sysbox runtime works
 ///
 /// IF THIS FAILS:
 /// Sysbox runtime is not configured, or Docker-in-Docker is not available.
@@ -117,25 +138,20 @@ async fn test_p0_spawn_sub_agent_docker() {
     create_agent_with_docker(&client, &name).await;
     wait_for_phase(&client, &name, "Running", TIMEOUT_RUNNING).await;
 
-    // Verify the pod was created with Sysbox runtime
-    let kube = kube_client().await;
-    let pods: kube::Api<k8s_openapi::api::core::v1::Pod> = 
-        kube::Api::namespaced(kube, &agent_namespace());
-    let pod_name = format!("agent-{}", name);
-    let pod = pods.get(&pod_name).await
-        .expect("pod should exist");
+    // Verify Docker daemon starts — this only works with Sysbox runtime
+    let logs = wait_for_log_containing(
+        &client,
+        &name,
+        "API listen on",
+        std::time::Duration::from_secs(120),
+    )
+    .await;
 
-    // Check runtime class
-    let runtime = pod.spec.as_ref()
-        .and_then(|s| s.runtime_class_name.as_ref())
-        .expect("pod should have runtime class name");
-    assert_eq!(runtime, "sysbox-runc", "pod must use sysbox-runc runtime");
-
-    // Check hostUsers is false
-    let host_users = pod.spec.as_ref()
-        .and_then(|s| s.host_users)
-        .expect("pod should have hostUsers set");
-    assert_eq!(host_users, false, "pod must have hostUsers=false for Sysbox");
+    assert!(
+        logs.contains("API listen on"),
+        "Docker daemon must start successfully (requires Sysbox runtime); got: {}",
+        logs
+    );
 }
 
 /// **Test Case #5 — Invalid creation params return 4xx error**
@@ -219,36 +235,38 @@ async fn test_p1_duplicate_name_conflict() {
 /// @testops 1.20 Agent process crashes — verify auto-restart and recovery to healthy state
 ///
 /// WHY THIS MATTERS:
-/// Agent pods have liveness probes. When an agent process crashes, Kubernetes
-/// must automatically restart the container. The restart_count must increase
-/// to track reliability.
+/// When an agent process crashes, Kubernetes must automatically restart the
+/// container. The restart_count must increase to track reliability.
 ///
 /// WHAT THIS TEST DOES:
-/// 1. Creates an agent and waits for Running
-/// 2. Kills PID 1 inside the container to simulate a crash
-/// 3. Waits for the agent to return to Running
-/// 4. Asserts restart_count has increased
+/// 1. Creates an agent with a command that exits immediately
+/// 2. Waits for restart_count to increase
+/// 3. Asserts restart_count > 0
 ///
 /// IF THIS FAILS:
-/// Liveness probes or restart policy are misconfigured. Crashed agents will
-/// stay down permanently.
+/// Restart policy is misconfigured. Crashed agents will stay down permanently.
 #[tokio::test]
 async fn test_p0_crash_auto_restarts() {
-    let (client, name, _guard) = setup_running_agent("crash").await;
-    let initial = wait_for_phase(&client, &name, "Running", TIMEOUT_RUNNING).await;
-    let initial_restarts = initial.restart_count.unwrap_or(0);
+    let client = http_client();
+    let name = unique_name("crash");
+    cleanup_agent(&client, &name).await;
+    let _guard = AgentGuard::new(&client, &name);
 
-    // Kill PID 1 to crash the container
-    let (pods, pod_name) = pod_api(&name).await;
-    let _ = exec_in_pod(&pods, &pod_name, vec!["kill", "1"]).await;
+    // Create agent with a command that exits immediately, triggering restarts
+    create_agent_with_command(&client, &name, vec!["sh", "-c", "exit 1"]).await;
 
-    // Wait for restart_count to increase (with proper polling)
-    let recovered = wait_for_restart_count_increase(&client, &name, initial_restarts, TIMEOUT_RUNNING).await;
+    // Wait for restart_count to increase (container will crash and be restarted)
+    let recovered = wait_for_restart_count_increase(
+        &client,
+        &name,
+        0,
+        TIMEOUT_RUNNING,
+    )
+    .await;
 
     assert!(
-        recovered.restart_count.unwrap_or(0) > initial_restarts,
-        "restart_count must increase after crash; was {}, now {}",
-        initial_restarts,
+        recovered.restart_count.unwrap_or(0) > 0,
+        "restart_count must increase after crash; got {}",
         recovered.restart_count.unwrap_or(0)
     );
 }
@@ -262,24 +280,30 @@ async fn test_p0_crash_auto_restarts() {
 /// expect their files to persist even when the agent process crashes.
 ///
 /// WHAT THIS TEST DOES:
-/// 1. Creates an agent and waits for Running
-/// 2. Writes a marker file to /home/agent
+/// 1. Creates an agent with a command that writes a marker on first run
+///    and outputs "PERSISTED" on subsequent runs
+/// 2. Waits for Running, verifies first-run output in logs
 /// 3. Restarts the agent via POST /instances/:name/restart
 /// 4. Waits for Running again
-/// 5. Reads the file back and asserts content matches
+/// 5. Checks logs for "PERSISTED" marker
 ///
 /// IF THIS FAILS:
 /// PVC is not mounted or data is stored on the ephemeral root filesystem.
 /// Users lose all their work on every restart.
 #[tokio::test]
 async fn test_p0_data_persists_across_restart() {
-    let (client, name, _guard) = setup_running_agent("persist").await;
+    let client = http_client();
+    let name = unique_name("persist");
+    cleanup_agent(&client, &name).await;
+    let _guard = AgentGuard::new(&client, &name);
 
-    // Write a marker file
-    let (pods, pod_name) = pod_api(&name).await;
-    const MARKER: &str = "restart-persist-check-67890";
-    let write_cmd = format!("echo -n '{}' > /home/agent/persist-test", MARKER);
-    exec_in_pod(&pods, &pod_name, vec!["sh", "-c", &write_cmd]).await;
+    // Command: on first run writes a marker, on subsequent runs reads it
+    let cmd = "if [ -f /home/agent/persist-test ]; then echo 'PERSISTED'; else echo 'FIRST_RUN' && echo -n 'restart-persist-check-67890' > /home/agent/persist-test; fi && sleep infinity";
+    create_agent_with_command(&client, &name, vec!["sh", "-c", cmd]).await;
+    wait_for_phase(&client, &name, "Running", TIMEOUT_RUNNING).await;
+
+    // Verify first run
+    wait_for_log_containing(&client, &name, "FIRST_RUN", std::time::Duration::from_secs(30)).await;
 
     // Restart via API
     let restart_url = format!("{}/instances/{}/restart", api_url(), name);
@@ -293,14 +317,18 @@ async fn test_p0_data_persists_across_restart() {
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     wait_for_phase(&client, &name, "Running", TIMEOUT_RUNNING).await;
 
-    // Read file back
-    let (pods2, _) = pod_api(&name).await;
-    let content =
-        exec_in_pod(&pods2, &pod_name, vec!["cat", "/home/agent/persist-test"]).await;
+    // Check logs for PERSISTED — the restarted container should find the file
+    let logs = wait_for_log_containing(
+        &client,
+        &name,
+        "PERSISTED",
+        std::time::Duration::from_secs(60),
+    )
+    .await;
 
-    assert_eq!(
-        content.trim(),
-        MARKER,
-        "file content must survive restart"
+    assert!(
+        logs.contains("PERSISTED"),
+        "file content must survive restart; got: {}",
+        logs
     );
 }

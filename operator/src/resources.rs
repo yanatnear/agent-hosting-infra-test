@@ -126,9 +126,16 @@ pub fn build_pod(agent: &Agent) -> Pod {
         })
         .collect();
 
+    let has_command_override = !agent.spec.command.is_empty();
+
     let container = Container {
         name: "agent".to_string(),
         image: Some(agent.spec.image.clone()),
+        command: if has_command_override {
+            Some(agent.spec.command.clone())
+        } else {
+            None
+        },
         ports: Some(
             agent.spec.ports.iter().map(|p| ContainerPort {
                 container_port: p.port,
@@ -155,26 +162,36 @@ pub fn build_pod(agent: &Agent) -> Pod {
                 ..Default::default()
             },
         ]),
-        liveness_probe: agent.spec.ports.first().map(|p| Probe {
-            tcp_socket: Some(TCPSocketAction {
-                port: IntOrString::Int(p.port),
+        // Skip probes when a custom command is set — the container may not
+        // listen on any port.
+        liveness_probe: if has_command_override {
+            None
+        } else {
+            agent.spec.ports.first().map(|p| Probe {
+                tcp_socket: Some(TCPSocketAction {
+                    port: IntOrString::Int(p.port),
+                    ..Default::default()
+                }),
+                initial_delay_seconds: Some(30),
+                period_seconds: Some(10),
+                failure_threshold: Some(10),
                 ..Default::default()
-            }),
-            initial_delay_seconds: Some(30),
-            period_seconds: Some(10),
-            failure_threshold: Some(10),
-            ..Default::default()
-        }),
-        readiness_probe: agent.spec.ports.first().map(|p| Probe {
-            tcp_socket: Some(TCPSocketAction {
-                port: IntOrString::Int(p.port),
+            })
+        },
+        readiness_probe: if has_command_override {
+            None
+        } else {
+            agent.spec.ports.first().map(|p| Probe {
+                tcp_socket: Some(TCPSocketAction {
+                    port: IntOrString::Int(p.port),
+                    ..Default::default()
+                }),
+                initial_delay_seconds: Some(30),
+                period_seconds: Some(5),
+                failure_threshold: Some(10),
                 ..Default::default()
-            }),
-            initial_delay_seconds: Some(30),
-            period_seconds: Some(5),
-            failure_threshold: Some(10),
-            ..Default::default()
-        }),
+            })
+        },
         env: if env_vars.is_empty() {
             None
         } else {
@@ -402,6 +419,7 @@ mod tests {
                     crate::crd::PortSpec { name: "ssh".to_string(), port: 22 },
                     crate::crd::PortSpec { name: "http".to_string(), port: 80 },
                 ],
+                command: vec![],
             },
         );
         agent.metadata.uid = Some(TEST_UID.to_string());

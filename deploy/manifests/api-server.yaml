@@ -77,7 +77,7 @@ metadata:
     app.kubernetes.io/name: agent-api
     app.kubernetes.io/part-of: nearai-agents
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: agent-api
@@ -91,6 +91,7 @@ spec:
       containers:
         - name: api
           image: ghcr.io/nearai/agent-api:latest
+          imagePullPolicy: Never
           ports:
             - name: http
               containerPort: 8080

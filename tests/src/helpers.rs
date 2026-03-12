@@ -60,17 +60,6 @@ pub fn http_client() -> Client {
 }
 
 // ---------------------------------------------------------------------------
-// Kubernetes client
-// ---------------------------------------------------------------------------
-
-/// Creates a kube-rs client from the default kubeconfig.
-pub async fn kube_client() -> kube::Client {
-    kube::Client::try_default()
-        .await
-        .expect("failed to create kube client from KUBECONFIG")
-}
-
-// ---------------------------------------------------------------------------
 // Name generation
 // ---------------------------------------------------------------------------
 
@@ -145,6 +134,44 @@ pub async fn create_agent(client: &Client, name: &str) -> InstanceResponse {
         resp.status().as_u16(),
         201,
         "create_agent must return 201 Created for name '{}'",
+        name
+    );
+
+    resp.json::<InstanceResponse>()
+        .await
+        .expect("failed to parse create response")
+}
+
+/// Creates an agent with a custom command override.
+/// The container runs the given command instead of the image's default entrypoint.
+/// Health probes are automatically skipped for command agents.
+pub async fn create_agent_with_command(
+    client: &Client,
+    name: &str,
+    command: Vec<&str>,
+) -> InstanceResponse {
+    let url = format!("{}/instances", api_url());
+    let body = serde_json::json!({
+        "name": name,
+        "image": test_image(),
+        "cpu": TEST_CPU,
+        "memory": TEST_MEMORY,
+        "disk": TEST_DISK,
+        "security_profile": "trusted",
+        "command": command,
+    });
+
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .expect("POST /instances request failed");
+
+    assert_eq!(
+        resp.status().as_u16(),
+        201,
+        "create_agent_with_command must return 201 Created for name '{}'",
         name
     );
 
@@ -230,6 +257,56 @@ pub async fn wait_for_deletion(client: &Client, name: &str, timeout: Duration) {
 }
 
 // ---------------------------------------------------------------------------
+// Logs helpers
+// ---------------------------------------------------------------------------
+
+/// Fetches logs from GET /instances/:name/logs and returns the lines.
+pub async fn get_logs(client: &Client, name: &str) -> Vec<String> {
+    let url = format!("{}/instances/{}/logs?tail=100", api_url(), name);
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .expect("GET /instances/:name/logs request failed");
+
+    if !resp.status().is_success() {
+        return vec![];
+    }
+
+    let logs: LogsResponse = resp.json().await.expect("failed to parse logs response");
+    logs.lines
+}
+
+/// Polls logs until they contain the expected substring, or times out.
+/// Returns the full log output on success.
+pub async fn wait_for_log_containing(
+    client: &Client,
+    name: &str,
+    expected: &str,
+    timeout: Duration,
+) -> String {
+    let deadline = tokio::time::Instant::now() + timeout;
+
+    loop {
+        if tokio::time::Instant::now() > deadline {
+            let lines = get_logs(client, name).await;
+            panic!(
+                "Timed out waiting for logs of '{}' to contain '{}' (waited {:?}). Last logs: {:?}",
+                name, expected, timeout, lines
+            );
+        }
+
+        let lines = get_logs(client, name).await;
+        let combined = lines.join("\n");
+        if combined.contains(expected) {
+            return combined;
+        }
+
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Composite setup helpers
 // ---------------------------------------------------------------------------
 
@@ -252,6 +329,43 @@ pub async fn setup_running_agent(prefix: &str) -> (Client, String, AgentGuard) {
     (client, name, guard)
 }
 
+/// Creates an agent with a custom command and waits for Running phase.
+/// Returns (client, name, _guard).
+pub async fn setup_running_command_agent(
+    prefix: &str,
+    command: Vec<&str>,
+) -> (Client, String, AgentGuard) {
+    let client = http_client();
+    let name = unique_name(prefix);
+    cleanup_agent(&client, &name).await;
+    let guard = AgentGuard::new(&client, &name);
+    create_agent_with_command(&client, &name, command).await;
+    wait_for_phase(&client, &name, "Running", TIMEOUT_RUNNING).await;
+    (client, name, guard)
+}
+
+/// Creates two agents with custom commands and waits for both to reach Running.
+/// Returns (client, name_a, name_b, _guard_a, _guard_b).
+pub async fn setup_two_running_command_agents(
+    prefix_a: &str,
+    command_a: Vec<&str>,
+    prefix_b: &str,
+    command_b: Vec<&str>,
+) -> (Client, String, String, AgentGuard, AgentGuard) {
+    let client = http_client();
+    let name_a = unique_name(prefix_a);
+    let name_b = unique_name(prefix_b);
+    cleanup_agent(&client, &name_a).await;
+    cleanup_agent(&client, &name_b).await;
+    let guard_a = AgentGuard::new(&client, &name_a);
+    let guard_b = AgentGuard::new(&client, &name_b);
+    create_agent_with_command(&client, &name_a, command_a).await;
+    create_agent_with_command(&client, &name_b, command_b).await;
+    wait_for_phase(&client, &name_a, "Running", TIMEOUT_RUNNING).await;
+    wait_for_phase(&client, &name_b, "Running", TIMEOUT_RUNNING).await;
+    (client, name_a, name_b, guard_a, guard_b)
+}
+
 /// Creates two agents and waits for both to reach Running.
 /// Returns (client, name_a, name_b, _guard_a, _guard_b).
 pub async fn setup_two_running_agents(
@@ -270,14 +384,6 @@ pub async fn setup_two_running_agents(
     wait_for_phase(&client, &name_a, "Running", TIMEOUT_RUNNING).await;
     wait_for_phase(&client, &name_b, "Running", TIMEOUT_RUNNING).await;
     (client, name_a, name_b, guard_a, guard_b)
-}
-
-/// Returns a namespaced Pod API handle and the pod name for an agent.
-pub async fn pod_api(name: &str) -> (kube::Api<k8s_openapi::api::core::v1::Pod>, String) {
-    let kube = kube_client().await;
-    let pods = kube::Api::namespaced(kube, &agent_namespace());
-    let pod_name = format!("agent-{}", name);
-    (pods, pod_name)
 }
 
 // ---------------------------------------------------------------------------
@@ -314,43 +420,6 @@ impl Drop for AgentGuard {
         })
         .join();
     }
-}
-
-// ---------------------------------------------------------------------------
-// Pod exec helper
-// ---------------------------------------------------------------------------
-
-/// Executes a command inside a pod and returns stdout as a string.
-/// Uses kube-rs attach API. Panics on failure with a descriptive message.
-pub async fn exec_in_pod(
-    pods: &kube::Api<k8s_openapi::api::core::v1::Pod>,
-    pod_name: &str,
-    command: Vec<&str>,
-) -> String {
-    use futures::TryStreamExt;
-
-    let mut attached = pods
-        .exec(
-            pod_name,
-            command.clone(),
-            &kube::api::AttachParams::default().stdout(true).stderr(true),
-        )
-        .await
-        .unwrap_or_else(|e| panic!("exec {:?} in pod '{}' failed: {}", command, pod_name, e));
-
-    let stdout = attached
-        .stdout()
-        .expect("stdout stream must be available");
-
-    let output: Vec<u8> = tokio_util::io::ReaderStream::new(stdout)
-        .try_fold(Vec::new(), |mut acc, chunk| async move {
-            acc.extend_from_slice(&chunk);
-            Ok(acc)
-        })
-        .await
-        .expect("failed to read exec stdout");
-
-    String::from_utf8_lossy(&output).to_string()
 }
 
 /// Polls GET /instances/:name until restart_count exceeds min_count or timeout.
@@ -405,6 +474,7 @@ pub async fn create_agent_with_docker(client: &Client, name: &str) -> InstanceRe
         "memory": "512Mi",
         "disk": "2Gi",
         "enable_docker": true,
+        "security_profile": "trusted",  // DinD needs writable rootfs
     });
 
     let resp = client

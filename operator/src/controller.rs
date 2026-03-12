@@ -362,6 +362,7 @@ mod tests {
                 security_profile: "restricted".to_string(),
                 env: vec![],
                 ports: vec![],
+                command: vec![],
             },
         );
         agent.metadata.uid = Some("test-uid".to_string());

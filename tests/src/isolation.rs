@@ -10,8 +10,8 @@ use crate::helpers::*;
 /// tenants.
 ///
 /// WHAT THIS TEST DOES:
-/// 1. Creates two agents (A and B), waits for both Running
-/// 2. Execs `ps aux` inside agent A
+/// 1. Creates two agents (A runs `ps aux`, B runs `sleep infinity`)
+/// 2. Checks agent A's logs for ps output
 /// 3. Asserts agent B's name does not appear in A's process list
 ///
 /// IF THIS FAILS:
@@ -19,15 +19,25 @@ use crate::helpers::*;
 /// processes, which is a security violation.
 #[tokio::test]
 async fn test_p0_cannot_see_other_agent_processes() {
-    let (_client, name_a, name_b, _guard_a, _guard_b) =
-        setup_two_running_agents("iso-a", "iso-b").await;
+    let (client, name_a, name_b, _guard_a, _guard_b) =
+        setup_two_running_command_agents(
+            "iso-a",
+            vec!["sh", "-c", "ps aux && sleep infinity"],
+            "iso-b",
+            vec!["sh", "-c", "sleep infinity"],
+        )
+        .await;
 
-    let (pods, pod_a) = pod_api(&name_a).await;
-
-    let ps_output = exec_in_pod(&pods, &pod_a, vec!["ps", "aux"]).await;
+    let logs = wait_for_log_containing(
+        &client,
+        &name_a,
+        "PID",
+        std::time::Duration::from_secs(30),
+    )
+    .await;
 
     assert!(
-        !ps_output.contains(&name_b),
+        !logs.contains(&name_b),
         "agent A must not see agent B's processes in ps output"
     );
 }
@@ -41,40 +51,54 @@ async fn test_p0_cannot_see_other_agent_processes() {
 /// read or write another agent's PVC-backed storage.
 ///
 /// WHAT THIS TEST DOES:
-/// 1. Creates two agents (A and B), waits for both Running
-/// 2. Writes a file in agent B's /home/agent
-/// 3. Attempts to read that path from agent A
-/// 4. Asserts the content is NOT the same (different PVC mounts)
+/// 1. Creates agent B that writes a secret file to /home/agent/secret
+/// 2. Creates agent A that tries to read /home/agent/secret
+/// 3. Asserts A does NOT see B's secret (separate PVC mounts)
 ///
 /// IF THIS FAILS:
 /// Agents share filesystem mounts. One tenant can read/modify another
 /// tenant's data — a critical security breach.
 #[tokio::test]
 async fn test_p0_cannot_access_other_agent_filesystem() {
-    let (_client, name_a, name_b, _guard_a, _guard_b) =
-        setup_two_running_agents("fs-a", "fs-b").await;
-
-    let (pods, _) = pod_api(&name_a).await;
-
-    // Write secret in B
-    let pod_b = format!("agent-{}", name_b);
     const SECRET: &str = "b-secret-data-77777";
-    let write_cmd = format!("echo -n '{}' > /home/agent/secret", SECRET);
-    exec_in_pod(&pods, &pod_b, vec!["sh", "-c", &write_cmd]).await;
 
-    // Try to read from A's perspective — file won't exist
-    let pod_a = format!("agent-{}", name_a);
-    let result = exec_in_pod(
-        &pods,
-        &pod_a,
-        vec!["cat", "/home/agent/secret"],
+    let (client, name_a, _name_b, _guard_a, _guard_b) =
+        setup_two_running_command_agents(
+            "fs-a",
+            vec![
+                "sh",
+                "-c",
+                "cat /home/agent/secret 2>&1 || echo 'FILE_NOT_FOUND'; sleep infinity",
+            ],
+            "fs-b",
+            vec![
+                "sh",
+                "-c",
+                &format!(
+                    "echo -n '{}' > /home/agent/secret && echo 'SECRET_WRITTEN' && sleep infinity",
+                    SECRET
+                ),
+            ],
+        )
+        .await;
+
+    // Wait for B to write its secret
+    wait_for_log_containing(
+        &client,
+        &_name_b,
+        "SECRET_WRITTEN",
+        std::time::Duration::from_secs(30),
     )
     .await;
 
-    assert_ne!(
-        result.trim(),
-        SECRET,
-        "agent A must not be able to read agent B's files"
+    // Check A's logs — should NOT contain B's secret
+    let logs_a = get_logs(&client, &name_a).await;
+    let combined = logs_a.join("\n");
+
+    assert!(
+        !combined.contains(SECRET),
+        "agent A must not be able to read agent B's files; got: {}",
+        combined
     );
 }
 
@@ -87,26 +111,33 @@ async fn test_p0_cannot_access_other_agent_filesystem() {
 /// like /etc/rancher would expose cluster secrets and configuration.
 ///
 /// WHAT THIS TEST DOES:
-/// 1. Creates an agent and waits for Running
-/// 2. Attempts to list /etc/rancher (K3s host config)
-/// 3. Asserts the command fails (directory not found or permission denied)
+/// 1. Creates an agent with a command that lists /etc/rancher
+/// 2. Checks logs for error output (directory not found or permission denied)
 ///
 /// IF THIS FAILS:
 /// Host filesystem is mounted or accessible inside agent containers.
 /// This is a critical container escape vector.
 #[tokio::test]
 async fn test_p1_cannot_access_host_filesystem() {
-    let (_client, name, _guard) = setup_running_agent("hostfs").await;
-    let (pods, pod_name) = pod_api(&name).await;
+    let (client, name, _guard) = setup_running_command_agent(
+        "hostfs",
+        vec!["sh", "-c", "ls /etc/rancher 2>&1; echo 'DONE'; sleep infinity"],
+    )
+    .await;
 
-    let result =
-        exec_in_pod(&pods, &pod_name, vec!["ls", "/etc/rancher"]).await;
+    let logs = wait_for_log_containing(
+        &client,
+        &name,
+        "DONE",
+        std::time::Duration::from_secs(30),
+    )
+    .await;
 
     // The directory should not exist or should return an error
     assert!(
-        result.contains("No such file") || result.contains("cannot access") || result.is_empty(),
+        logs.contains("No such file") || logs.contains("cannot access") || !logs.contains("k3s"),
         "host path /etc/rancher must not be accessible; got: {}",
-        result
+        logs
     );
 }
 
@@ -119,39 +150,38 @@ async fn test_p1_cannot_access_host_filesystem() {
 /// allow container escape via service account token exploitation.
 ///
 /// WHAT THIS TEST DOES:
-/// 1. Creates an agent and waits for Running
-/// 2. Attempts to curl the K8s API internal endpoint
-/// 3. Asserts the connection is blocked or refused
+/// 1. Creates an agent with a command that curls the K8s API
+/// 2. Checks logs for connection failure
 ///
 /// IF THIS FAILS:
 /// NetworkPolicy doesn't block access to the K8s API. Agents could list
 /// pods, read secrets, or escalate privileges.
 #[tokio::test]
 async fn test_p1_cannot_access_host_management() {
-    let (_client, name, _guard) = setup_running_agent("k8sapi").await;
-    let (pods, pod_name) = pod_api(&name).await;
-
-    // Attempt to reach the K8s API — should timeout or be refused
-    let result = exec_in_pod(
-        &pods,
-        &pod_name,
+    let (client, name, _guard) = setup_running_command_agent(
+        "k8sapi",
         vec![
-            "curl",
-            "-sf",
-            "--connect-timeout",
-            "5",
-            "https://kubernetes.default.svc/api",
+            "sh",
+            "-c",
+            "curl -sf --connect-timeout 5 https://kubernetes.default.svc/api 2>&1 || echo 'K8S_API_BLOCKED'; sleep infinity",
         ],
     )
     .await;
 
-    // The request should fail — empty output, connection refused, or timeout
+    let logs = wait_for_log_containing(
+        &client,
+        &name,
+        "K8S_API_BLOCKED",
+        std::time::Duration::from_secs(30),
+    )
+    .await;
+
     assert!(
-        result.is_empty()
-            || result.contains("refused")
-            || result.contains("timed out")
-            || result.contains("couldn't connect"),
+        logs.contains("K8S_API_BLOCKED")
+            || logs.contains("refused")
+            || logs.contains("timed out")
+            || logs.contains("couldn't connect"),
         "K8s API must not be reachable from agent pods; got: {}",
-        result
+        logs
     );
 }

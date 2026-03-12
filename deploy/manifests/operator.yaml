@@ -107,6 +107,7 @@ spec:
       containers:
         - name: operator
           image: ghcr.io/nearai/agent-operator:latest
+          imagePullPolicy: Never
           env:
             - name: RUST_LOG
               value: "info"

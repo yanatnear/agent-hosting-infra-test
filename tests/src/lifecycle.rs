@@ -40,23 +40,29 @@ async fn test_p0_stop_agent() {
 /// User data written before stopping must still be available after starting.
 ///
 /// WHAT THIS TEST DOES:
-/// 1. Creates an agent, waits for Running, writes a marker file
+/// 1. Creates an agent with a command that writes a marker on first run
+///    and outputs "PERSISTED" on subsequent runs
 /// 2. Stops the agent, waits for Stopped
 /// 3. Starts the agent, waits for Running
-/// 4. Reads the marker file back and asserts it matches
+/// 4. Checks logs for "PERSISTED" marker
 ///
 /// IF THIS FAILS:
 /// Data is lost when agents are stopped and started, or the start operation
 /// doesn't properly remount the PVC.
 #[tokio::test]
 async fn test_p0_start_stopped_agent_data_intact() {
-    let (client, name, _guard) = setup_running_agent("start").await;
+    let client = http_client();
+    let name = unique_name("start");
+    cleanup_agent(&client, &name).await;
+    let _guard = AgentGuard::new(&client, &name);
 
-    // Write marker file
-    let (pods, pod_name) = pod_api(&name).await;
-    const MARKER: &str = "stop-start-persist-99999";
-    let write_cmd = format!("echo -n '{}' > /home/agent/stop-start-test", MARKER);
-    exec_in_pod(&pods, &pod_name, vec!["sh", "-c", &write_cmd]).await;
+    // Command: writes marker on first run, outputs PERSISTED on subsequent runs
+    let cmd = "if [ -f /home/agent/stop-start-test ]; then echo 'PERSISTED'; else echo -n 'stop-start-persist-99999' > /home/agent/stop-start-test && echo 'FIRST_RUN'; fi && sleep infinity";
+    create_agent_with_command(&client, &name, vec!["sh", "-c", cmd]).await;
+    wait_for_phase(&client, &name, "Running", TIMEOUT_RUNNING).await;
+
+    // Verify first run
+    wait_for_log_containing(&client, &name, "FIRST_RUN", std::time::Duration::from_secs(30)).await;
 
     // Stop
     let stop_url = format!("{}/instances/{}/stop", api_url(), name);
@@ -68,16 +74,20 @@ async fn test_p0_start_stopped_agent_data_intact() {
     client.post(&start_url).send().await.expect("start failed");
     wait_for_phase(&client, &name, "Running", TIMEOUT_RUNNING).await;
 
-    // Read marker file back
-    let (pods2, _) = pod_api(&name).await;
-    let content = exec_in_pod(
-        &pods2,
-        &pod_name,
-        vec!["cat", "/home/agent/stop-start-test"],
+    // Check logs for PERSISTED
+    let logs = wait_for_log_containing(
+        &client,
+        &name,
+        "PERSISTED",
+        std::time::Duration::from_secs(60),
     )
     .await;
 
-    assert_eq!(content.trim(), MARKER, "data must survive stop/start cycle");
+    assert!(
+        logs.contains("PERSISTED"),
+        "data must survive stop/start cycle; got: {}",
+        logs
+    );
 }
 
 /// **Test Case #11 — Restart preserves data**
@@ -89,22 +99,27 @@ async fn test_p0_start_stopped_agent_data_intact() {
 /// User data on the PVC must survive the restart.
 ///
 /// WHAT THIS TEST DOES:
-/// 1. Creates agent, waits for Running, writes marker
+/// 1. Creates agent with a command that writes marker on first run,
+///    outputs PERSISTED on subsequent runs
 /// 2. Restarts via POST /instances/:name/restart
-/// 3. Waits for Running, reads marker back
+/// 3. Waits for Running, checks logs for PERSISTED
 ///
 /// IF THIS FAILS:
 /// Restart destroys PVC data, or the operator doesn't properly recreate the
 /// pod with the same PVC mount.
 #[tokio::test]
 async fn test_p1_restart_data_intact() {
-    let (client, name, _guard) = setup_running_agent("restart").await;
+    let client = http_client();
+    let name = unique_name("restart");
+    cleanup_agent(&client, &name).await;
+    let _guard = AgentGuard::new(&client, &name);
 
-    // Write marker
-    let (pods, pod_name) = pod_api(&name).await;
-    const MARKER: &str = "restart-data-intact-55555";
-    let write_cmd = format!("echo -n '{}' > /home/agent/restart-test", MARKER);
-    exec_in_pod(&pods, &pod_name, vec!["sh", "-c", &write_cmd]).await;
+    let cmd = "if [ -f /home/agent/restart-test ]; then echo 'PERSISTED'; else echo -n 'restart-data-intact-55555' > /home/agent/restart-test && echo 'FIRST_RUN'; fi && sleep infinity";
+    create_agent_with_command(&client, &name, vec!["sh", "-c", cmd]).await;
+    wait_for_phase(&client, &name, "Running", TIMEOUT_RUNNING).await;
+
+    // Verify first run
+    wait_for_log_containing(&client, &name, "FIRST_RUN", std::time::Duration::from_secs(30)).await;
 
     // Restart
     let restart_url = format!("{}/instances/{}/restart", api_url(), name);
@@ -113,16 +128,20 @@ async fn test_p1_restart_data_intact() {
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     wait_for_phase(&client, &name, "Running", TIMEOUT_RUNNING).await;
 
-    // Read back
-    let (pods2, _) = pod_api(&name).await;
-    let content = exec_in_pod(
-        &pods2,
-        &pod_name,
-        vec!["cat", "/home/agent/restart-test"],
+    // Check logs for PERSISTED
+    let logs = wait_for_log_containing(
+        &client,
+        &name,
+        "PERSISTED",
+        std::time::Duration::from_secs(60),
     )
     .await;
 
-    assert_eq!(content.trim(), MARKER, "data must survive restart");
+    assert!(
+        logs.contains("PERSISTED"),
+        "data must survive restart; got: {}",
+        logs
+    );
 }
 
 /// **Test Case #12 — Stop an already-stopped agent is idempotent**

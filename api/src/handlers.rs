@@ -36,6 +36,8 @@ pub struct CreateInstanceRequest {
     pub ports: Vec<crate::crd::PortSpec>,
     #[serde(default)]
     pub enable_docker: bool,
+    #[serde(default)]
+    pub command: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -117,6 +119,7 @@ pub async fn create_instance(
             security_profile: req.security_profile.unwrap_or_else(|| "restricted".to_string()),
             env: req.env,
             enable_docker: req.enable_docker,
+            command: req.command,
             ports: if req.ports.is_empty() {
                 vec![
                     crate::crd::PortSpec { name: "ssh".to_string(), port: 22 },
@@ -331,6 +334,7 @@ mod tests {
                 security_profile: "restricted".to_string(),
                 env: vec![],
                 ports: vec![],
+                command: vec![],
             },
             status,
         }
@@ -474,6 +478,7 @@ mod tests {
                 security_profile: "restricted".to_string(),
                 env: vec![],
                 ports: vec![],
+                command: vec![],
             },
             status: None,
         };

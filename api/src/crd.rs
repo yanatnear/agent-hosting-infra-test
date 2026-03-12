@@ -37,6 +37,9 @@ pub struct AgentSpec {
     pub enable_docker: bool,
     #[serde(default = "default_ports")]
     pub ports: Vec<PortSpec>,
+    /// Optional command override for the container entrypoint.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub command: Vec<String>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
