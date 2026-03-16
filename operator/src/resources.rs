@@ -16,6 +16,32 @@ use kube::{Resource, ResourceExt};
 
 use crate::crd::Agent;
 
+/// Parse a CPU spec (e.g. "1", "500m", "0.5") into millicores.
+fn parse_cpu_millis(s: &str) -> u64 {
+    if let Some(m) = s.strip_suffix('m') {
+        m.parse().unwrap_or(1000)
+    } else if let Ok(v) = s.parse::<f64>() {
+        (v * 1000.0) as u64
+    } else {
+        1000
+    }
+}
+
+/// Parse a memory spec (e.g. "2Gi", "512Mi", "2G") into MiB.
+fn parse_memory_mi(s: &str) -> u64 {
+    if let Some(v) = s.strip_suffix("Gi") {
+        v.parse::<u64>().unwrap_or(2) * 1024
+    } else if let Some(v) = s.strip_suffix("Mi") {
+        v.parse().unwrap_or(512)
+    } else if let Some(v) = s.strip_suffix('G') {
+        v.parse::<u64>().unwrap_or(2) * 1024
+    } else if let Some(v) = s.strip_suffix('M') {
+        v.parse().unwrap_or(512)
+    } else {
+        512
+    }
+}
+
 /// Build security context based on the agent's security profile.
 fn build_security_context(profile: &str) -> SecurityContext {
     match profile {
@@ -107,15 +133,20 @@ pub fn build_pod(agent: &Agent) -> Pod {
     let name = agent.name_any();
     let ns = agent.namespace().unwrap_or_else(|| "agents".to_string());
 
+    // Requests = 25% of limits (Burstable QoS) so more pods fit on a node.
+    // Limits enforce the hard cap; requests affect scheduling only.
+    let cpu_request = format!("{}m", parse_cpu_millis(&agent.spec.cpu) / 4);
+    let mem_request = format!("{}Mi", parse_memory_mi(&agent.spec.memory) / 4);
+
     let mut resource_requests = BTreeMap::new();
-    resource_requests.insert("cpu".to_string(), Quantity(agent.spec.cpu.clone()));
-    resource_requests.insert("memory".to_string(), Quantity(agent.spec.memory.clone()));
+    resource_requests.insert("cpu".to_string(), Quantity(cpu_request));
+    resource_requests.insert("memory".to_string(), Quantity(mem_request));
 
     let mut resource_limits = BTreeMap::new();
     resource_limits.insert("cpu".to_string(), Quantity(agent.spec.cpu.clone()));
     resource_limits.insert("memory".to_string(), Quantity(agent.spec.memory.clone()));
 
-    let env_vars: Vec<k8s_openapi::api::core::v1::EnvVar> = agent
+    let mut env_vars: Vec<k8s_openapi::api::core::v1::EnvVar> = agent
         .spec
         .env
         .iter()
@@ -125,6 +156,15 @@ pub fn build_pod(agent: &Agent) -> Pod {
             ..Default::default()
         })
         .collect();
+
+    // Inject SSH public key so the entrypoint can set up authorized_keys
+    if let Some(ref pubkey) = agent.spec.ssh_pubkey {
+        env_vars.push(k8s_openapi::api::core::v1::EnvVar {
+            name: "SSH_PUBKEY".to_string(),
+            value: Some(pubkey.clone()),
+            ..Default::default()
+        });
+    }
 
     let has_command_override = !agent.spec.command.is_empty();
 
@@ -499,14 +539,14 @@ mod tests {
     /// WHY THIS MATTERS:
     /// The container image determines what code runs inside the agent. Ports 22
     /// (SSH) and 80 (HTTP) are required for remote access and the health probes.
-    /// Resource requests=limits ensures guaranteed QoS class, preventing noisy
-    /// neighbors from stealing CPU/memory.
+    /// Resource requests are 25% of limits (Burstable QoS) for better scheduling
+    /// density. Limits enforce hard caps.
     ///
     /// WHAT THIS TEST DOES:
     /// 1. Builds a Pod and extracts the first container
     /// 2. Verifies the image matches the agent spec
     /// 3. Verifies ports 22 and 80 are exposed
-    /// 4. Verifies resource requests equal limits (Guaranteed QoS)
+    /// 4. Verifies resource requests are 25% of limits (Burstable QoS)
     ///
     /// IF THIS FAILS:
     /// Agent pods won't get the correct image or resource allocation. SSH/HTTP
@@ -545,25 +585,28 @@ mod tests {
         let requests = resources.requests.as_ref().expect("must have requests");
         let limits = resources.limits.as_ref().expect("must have limits");
 
+        // Requests = 25% of limits (Burstable QoS) for better scheduling density.
+        // TEST_CPU = "2" → 2000m / 4 = 500m
         assert_eq!(
             requests.get("cpu").map(|q| &q.0),
-            Some(&TEST_CPU.to_string()),
-            "CPU request must match spec"
+            Some(&"500m".to_string()),
+            "CPU request must be 25% of limit"
         );
         assert_eq!(
             limits.get("cpu").map(|q| &q.0),
             Some(&TEST_CPU.to_string()),
-            "CPU limit must equal request for Guaranteed QoS"
+            "CPU limit must match spec"
         );
+        // TEST_MEMORY = "8Gi" → 8192Mi / 4 = 2048Mi
         assert_eq!(
             requests.get("memory").map(|q| &q.0),
-            Some(&TEST_MEMORY.to_string()),
-            "memory request must match spec"
+            Some(&"2048Mi".to_string()),
+            "memory request must be 25% of limit"
         );
         assert_eq!(
             limits.get("memory").map(|q| &q.0),
             Some(&TEST_MEMORY.to_string()),
-            "memory limit must equal request for Guaranteed QoS"
+            "memory limit must match spec"
         );
     }
 

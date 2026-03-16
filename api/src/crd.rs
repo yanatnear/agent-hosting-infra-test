@@ -40,6 +40,9 @@ pub struct AgentSpec {
     /// Optional command override for the container entrypoint.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub command: Vec<String>,
+    /// SSH public key to inject into the agent container.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_pubkey: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]

@@ -220,13 +220,20 @@ pub async fn create_instance(
             env: env_vars,
             enable_docker: req.enable_docker,
             command: req.command,
+            ssh_pubkey: req.ssh_pubkey,
             ports: if req.ports.is_empty() {
                 if req.service_type.is_some() {
-                    // CrabShack payloads: default to 8080 (common worker port)
-                    vec![crate::crd::PortSpec {
-                        name: "http".to_string(),
-                        port: 8080,
-                    }]
+                    // CrabShack payloads: default to SSH + 8080 (worker port)
+                    vec![
+                        crate::crd::PortSpec {
+                            name: "ssh".to_string(),
+                            port: 22,
+                        },
+                        crate::crd::PortSpec {
+                            name: "http".to_string(),
+                            port: 8080,
+                        },
+                    ]
                 } else {
                     vec![
                         crate::crd::PortSpec {
@@ -677,6 +684,7 @@ mod tests {
                 env: vec![],
                 ports: vec![],
                 command: vec![],
+                ssh_pubkey: None,
             },
             status,
         }
