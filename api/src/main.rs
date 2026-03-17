@@ -1,9 +1,13 @@
+use axum::http::StatusCode;
+use axum::middleware;
 use axum::routing::{delete, get, post};
 use axum::Router;
+use serde_json::json;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
+use agent_api::auth;
 use agent_api::handlers;
 use agent_api::handlers::AppState;
 
@@ -25,6 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = Router::new()
         .route("/health", get(handlers::health))
+        .route("/nodes", get(handlers::list_nodes))
         .route("/instances", post(handlers::create_instance))
         .route("/instances", get(handlers::list_instances))
         .route("/instances/{name}", get(handlers::get_instance))
@@ -36,6 +41,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             post(handlers::restart_instance),
         )
         .route("/instances/{name}/logs", get(handlers::get_logs))
+        .route("/instances/{name}/ssh", get(handlers::get_ssh_info))
+        .route("/instances/{name}/stats", get(handlers::get_stats))
+        .fallback(|| async {
+            (
+                StatusCode::NOT_FOUND,
+                axum::Json(json!({"error": "endpoint not found"})),
+            )
+        })
+        .layer(middleware::from_fn(auth::require_bearer_token))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
         .with_state(state);

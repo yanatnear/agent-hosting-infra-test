@@ -363,6 +363,9 @@ mod tests {
                 env: vec![],
                 ports: vec![],
                 command: vec![],
+                ssh_pubkey: None,
+                service_type: None,
+                node_id: None,
             },
         );
         agent.metadata.uid = Some("test-uid".to_string());

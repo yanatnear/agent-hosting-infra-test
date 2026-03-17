@@ -6,6 +6,7 @@ use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Json};
 use futures::stream::Stream;
 use k8s_openapi::api::core::v1::{Node, Pod, Service};
+use k8s_openapi::api::node::v1::RuntimeClass;
 use kube::api::{Api, DeleteParams, ListParams, LogParams, Patch, PatchParams, PostParams};
 use kube::Client;
 use serde::{Deserialize, Serialize};
@@ -105,8 +106,8 @@ impl From<Agent> for InstanceResponse {
             status,
             image: spec.image,
             created_at,
-            service_type: None,
-            node_id: agent_status.host_node.clone(),
+            service_type: spec.service_type,
+            node_id: spec.node_id.or_else(|| agent_status.host_node.clone()),
             pod_ip: agent_status.pod_ip,
             host_node: agent_status.host_node,
             restart_count: agent_status.restart_count,
@@ -196,9 +197,14 @@ pub async fn create_instance(
         });
     }
 
+    // Capture CrabShack fields before partial move of req
+    let service_type = req.service_type;
+    let node_id = req.node_id;
+    let has_service_type = service_type.is_some();
+
     // Default volume mount to /workspace for CrabShack payloads
     let volume_mount = req.volume_mount.unwrap_or_else(|| {
-        if req.service_type.is_some() {
+        if has_service_type {
             "/workspace".to_string()
         } else {
             "/home/agent".to_string()
@@ -221,13 +227,15 @@ pub async fn create_instance(
             enable_docker: req.enable_docker,
             command: req.command,
             ssh_pubkey: req.ssh_pubkey,
+            service_type,
+            node_id,
             ports: if req.ports.is_empty() {
-                if req.service_type.is_some() {
-                    // CrabShack payloads: default to SSH + 8080 (worker port)
+                if has_service_type {
+                    // CrabShack payloads (ironclaw): sshd listens on 2222, app on 8080
                     vec![
                         crate::crd::PortSpec {
                             name: "ssh".to_string(),
-                            port: 22,
+                            port: 2222,
                         },
                         crate::crd::PortSpec {
                             name: "http".to_string(),
@@ -604,8 +612,12 @@ pub async fn get_stats(
 pub async fn list_nodes(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<serde_json::Value>>, AppError> {
-    let nodes_api: Api<Node> = Api::all(state.client);
+    let nodes_api: Api<Node> = Api::all(state.client.clone());
     let nodes = nodes_api.list(&ListParams::default()).await?;
+
+    // Check if sysbox-runc RuntimeClass exists in the cluster
+    let rc_api: Api<RuntimeClass> = Api::all(state.client);
+    let sysbox_available = rc_api.get_opt("sysbox-runc").await?.is_some();
 
     let ssh_host =
         env::var("NODE_SSH_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
@@ -633,6 +645,7 @@ pub async fn list_nodes(
                 "disk_gb_total": 200,
                 "port_range_start": 30000,
                 "port_range_end": 32767,
+                "sysbox_available": sysbox_available,
             })
         })
         .collect();
@@ -685,6 +698,8 @@ mod tests {
                 ports: vec![],
                 command: vec![],
                 ssh_pubkey: None,
+                service_type: None,
+                node_id: None,
             },
             status,
         }

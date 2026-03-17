@@ -40,6 +40,12 @@ pub struct AgentSpec {
     /// SSH public key to inject into the agent container.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_pubkey: Option<String>,
+    /// CrabShack service type (e.g. "ironclaw").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_type: Option<String>,
+    /// Target node ID for scheduling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]

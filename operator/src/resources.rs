@@ -57,6 +57,7 @@ fn build_security_context(profile: &str) -> SecurityContext {
                     "SETUID".to_string(),
                     "SETGID".to_string(),
                     "DAC_OVERRIDE".to_string(),
+                    "SYS_CHROOT".to_string(),
                 ]),
             }),
             ..Default::default()
@@ -460,6 +461,9 @@ mod tests {
                     crate::crd::PortSpec { name: "http".to_string(), port: 80 },
                 ],
                 command: vec![],
+                ssh_pubkey: None,
+                service_type: None,
+                node_id: None,
             },
         );
         agent.metadata.uid = Some(TEST_UID.to_string());
