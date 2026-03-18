@@ -1,4 +1,4 @@
-# nearai-infra — Agent Hosting Platform
+# K3s-based Agent Hosting Platform
 
 Multi-tenant agent hosting platform where AI agents run on shared K3s clusters. Agents are managed as Kubernetes custom resources with full lifecycle support.
 
